@@ -1,0 +1,19 @@
+{
+  "name": "ember-kitchen-restaurant-portal",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Restaurant QR ordering and POS portal",
+  "scripts": {
+    "start": "node server.js",
+    "db:init": "node scripts/init-db.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "helmet": "^8.1.0",
+    "multer": "^2.4.0",
+    "mysql2": "^3.14.1",
+    "socket.io": "^4.8.1"
+  }
+}
