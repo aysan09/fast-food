@@ -1,5 +1,5 @@
-CREATE DATABASE IF NOT EXISTS ember_kitchen CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-USE ember_kitchen;
+CREATE DATABASE IF NOT EXISTS seba_cafe CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+USE seba_cafe;
 
 CREATE TABLE IF NOT EXISTS restaurant_tables (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -53,7 +53,10 @@ CREATE TABLE IF NOT EXISTS orders (
     customer_email VARCHAR(190) NULL,
     total_amount DECIMAL(10,2) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_orders_active (status, created_at)
+    INDEX idx_orders_active (status, created_at),
+    INDEX idx_orders_payment (payment_status, payment_method),
+    INDEX idx_orders_table (table_number, status),
+    CONSTRAINT fk_orders_table FOREIGN KEY (table_number) REFERENCES restaurant_tables(table_number)
 );
 
 CREATE TABLE IF NOT EXISTS order_items (
@@ -81,7 +84,7 @@ ON DUPLICATE KEY UPDATE display_order = VALUES(display_order);
 INSERT INTO menu_items (category_id, name, price, image_url, description, status)
 SELECT c.id, seed.name, seed.price, seed.image_url, seed.description, seed.status
 FROM (
-    SELECT 'Burgers' category_name, 'Classic Smash Burger' name, 680.00 price, 'photo-1568901346375-23c9450c58cd' image_url, 'Double-seared beef, aged cheddar, Ember sauce.' description, 'in_stock' status
+    SELECT 'Burgers' category_name, 'Classic Smash Burger' name, 680.00 price, 'photo-1568901346375-23c9450c58cd' image_url, 'Double-seared beef, aged cheddar, Seba sauce.' description, 'in_stock' status
     UNION ALL SELECT 'Combos', 'Double Smash Combo', 980.00, 'photo-1550547660-d9450f859349', 'Two patties, golden fries and a cold drink.', 'in_stock'
     UNION ALL SELECT 'Burgers', 'Crispy Chicken Burger', 620.00, 'photo-1606755962773-d324e0a13086', 'Buttermilk crunch, slaw and pepper mayo.', 'in_stock'
     UNION ALL SELECT 'Sides', 'Rosemary Fries', 280.00, 'photo-1573080496219-bb080dd4f877', 'Hand-cut potatoes, rosemary salt.', 'in_stock'

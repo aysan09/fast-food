@@ -1,4 +1,4 @@
-# EMBER KITCHEN
+# SEBA CAFE
 
 Node.js, Express, MySQL, and Socket.IO restaurant ordering portal. Customer orders and prices are validated by the server. Customers can pay by manual Telebirr/CBE transfer with receipt review, cash at the counter, or a Chapa phone prompt.
 
@@ -21,11 +21,10 @@ Node.js, Express, MySQL, and Socket.IO restaurant ordering portal. Customer orde
 9. Start the app:
 
    ```text
-   npm install
    npm start
    ```
 
-Open `http://localhost:3000`. Use the staff emails/passwords set in `.env` to enter the protected workspaces. For real payments, replace the test secret with the merchant’s live secret only after end-to-end testing.
+Open `http://localhost:3000`. Staff passwords must be at least 8 characters in production; sign-in is rate limited to 10 attempts per 15 minutes. Unpaid online orders are cancelled automatically after 30 minutes and their tables are released. Use the staff emails/passwords set in `.env` to enter the protected workspaces. For real payments, replace the test secret with the merchant’s live secret only after end-to-end testing.
 
 ## Payment flow
 
@@ -36,6 +35,14 @@ Open `http://localhost:3000`. Use the staff emails/passwords set in `.env` to en
 - Cash orders remain pending until a cashier explicitly confirms cash receipt.
 - Manual transfer orders require an uploaded JPG, PNG, or WebP receipt (up to 5 MB). The image is stored in `uploads/payment-receipts` and is served only to signed-in cashiers and admins. Cashiers compare the receipt with the bank notification, then approve it into the kitchen or reject it with an optional reason.
 - Configure restaurant transfer account details in `.env`; these values are public checkout instructions, not payment credentials.
+
+## Payment providers (Chapa)
+
+Customers can pay online with Telebirr, CBE Birr, Coopay-Ebirr, M-Pesa, or Awash Birr (phone prompt via Chapa Direct Charge), or choose **Bank, card & more**, which opens Chapa's hosted secure page for banks, cards, and other wallets.
+
+- **Full payment:** the customer pays the whole order total at checkout.
+- **Bill payment:** a customer who chose cash can open **Pay my bill online** on the confirmation page and settle the same order with any provider above. If the online attempt fails, the order returns to cash-at-counter.
+- M-Pesa requires at least ETB 20. Test every provider in Chapa's sandbox before going live; the hosted page return and webhook both verify the transaction with Chapa before the kitchen is notified.
 
 ## API
 

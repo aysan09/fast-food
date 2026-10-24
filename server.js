@@ -9,7 +9,7 @@ const helmet = require('helmet');
 const multer = require('multer');
 const mysql = require('mysql2/promise');
 const { Server } = require('socket.io');
-const { chargeWasInitiated, moneyInCents, normalizeEthiopianMobile, verificationMatches, webhookSignatureIsValid } = require('./payments');
+const { DIRECT_CHANNELS, HOSTED_CHANNEL, MINIMUM_ETB, isSupportedChannel, checkoutWasCreated, hostedPaymentBody, merchantReference, chapaPhoneNumber, moneyInCents, verificationMatches, webhookSignatureIsValid } = require('./payments');
 
 const app = express();
 const server = http.createServer(app);
@@ -24,18 +24,25 @@ const receiptUpload = multer({
     limits: { fileSize: 5 * 1024 * 1024, files: 1 },
     fileFilter: (req, file, callback) => callback(null, ['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype))
 });
+const itemImageDirectory = path.join(root, 'uploads', 'menu-items');
+const itemImageUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+    fileFilter: (req, file, callback) => callback(null, ['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype))
+});
 const pool = mysql.createPool({
     host: process.env.DB_HOST || '127.0.0.1',
     port: Number(process.env.DB_PORT || 3306),
     user: process.env.DB_USER || 'root',
     password: process.env.DB_PASSWORD || '',
-    database: process.env.DB_NAME || 'ember_kitchen',
+    database: process.env.DB_NAME || 'seba_cafe',
     waitForConnections: true,
     connectionLimit: 10,
     decimalNumbers: false
 });
 
 app.disable('x-powered-by');
+if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', 1);
 app.use(helmet({
     contentSecurityPolicy: {
         directives: {
@@ -65,9 +72,10 @@ function signSession(payload) {
 
 function getSession(req) {
     if (!sessionSecret) return null;
-    const cookie = req.headers.cookie?.split(';').map(value => value.trim()).find(value => value.startsWith('ember_session='));
+    const cookie = req.headers.cookie?.split(';').map(value => value.trim()).find(value => value.startsWith('seba_session='));
     if (!cookie) return null;
-    const token = decodeURIComponent(cookie.slice('ember_session='.length));
+    let token;
+    try { token = decodeURIComponent(cookie.slice('seba_session='.length)); } catch { return null; }
     const [encoded, signature] = token.split('.');
     if (!encoded || !signature) return null;
     const expected = crypto.createHmac('sha256', sessionSecret).update(encoded).digest('base64url');
@@ -94,8 +102,19 @@ function requireRole(...roles) {
 function attachSession(res, user) {
     const token = signSession({ id: user.id, name: user.name, role: user.role, exp: Date.now() + 12 * 60 * 60 * 1000 });
     const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
-    res.setHeader('Set-Cookie', `ember_session=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=43200${secure}`);
+    res.setHeader('Set-Cookie', `seba_session=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=43200${secure}`);
 }
+
+const loginAttempts = new Map();
+function loginRateLimited(key) {
+    const now = Date.now();
+    const entry = loginAttempts.get(key);
+    if (!entry || entry.resetAt < now) { loginAttempts.set(key, { count: 1, resetAt: now + 15 * 60 * 1000 }); return false; }
+    entry.count += 1;
+    return entry.count > 10;
+}
+setInterval(() => { const now = Date.now(); for (const [key, entry] of loginAttempts) if (entry.resetAt < now) loginAttempts.delete(key); }, 10 * 60 * 1000).unref();
+const dummyHash = `${'0'.repeat(32)}:${'0'.repeat(128)}`;
 
 function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
     return `${salt}:${crypto.scryptSync(password, salt, 64).toString('hex')}`;
@@ -117,6 +136,7 @@ async function bootstrapStaff() {
     ];
     for (const user of staff) {
         if (!user.email || !user.password || user.password.startsWith('replace-with-')) continue;
+        if (process.env.NODE_ENV === 'production' && user.password.length < 8) throw new Error(`Set a staff password of at least 8 characters for ${user.role} in .env.`);
         await pool.execute(
             `INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE name = VALUES(name), password_hash = VALUES(password_hash), role = VALUES(role)`,
@@ -160,43 +180,80 @@ function receiptImageType(buffer) {
     return null;
 }
 
-async function verifyWithChapa(transactionReference) {
+async function releaseTableIfIdle(connection, tableNumber) {
+    const [active] = await connection.execute(
+        `SELECT COUNT(*) AS count FROM orders WHERE table_number = ? AND status IN ('pending_approval', 'in_kitchen', 'ready')`,
+        [tableNumber]
+    );
+    if (Number(active[0].count) === 0) {
+        await connection.execute("UPDATE restaurant_tables SET status = 'available' WHERE table_number = ? AND status = 'occupied'", [tableNumber]);
+    }
+}
+
+async function cancelAbandonedOrders() {
+    const [stale] = await pool.execute(
+        `SELECT id, table_number FROM orders WHERE payment_method = 'digital_aggregator' AND payment_status = 'unpaid'
+         AND status = 'pending_approval' AND created_at < (NOW() - INTERVAL 30 MINUTE)`
+    );
+    for (const order of stale) {
+        const [updated] = await pool.execute(
+            `UPDATE orders SET status = 'cancelled', payment_status = 'failed' WHERE id = ? AND payment_status = 'unpaid' AND status = 'pending_approval'`,
+            [order.id]
+        );
+        if (updated.affectedRows) {
+            await releaseTableIfIdle(pool, order.table_number);
+            io.to('staff').emit('order_status_updated', { id: order.id, status: 'cancelled', payment_status: 'failed' });
+        }
+    }
+}
+
+const CHAPA_API_BASE = process.env.CHAPA_API_BASE || 'https://api.chapa.global/v2';
+
+// v2 verifies by the provider payment reference (the tail of checkout_url), so prefer the
+// stored provider_reference and fall back to the merchant reference for older orders.
+async function verifyWithChapa(paymentReference) {
     const secret = process.env.CHAPA_SECRET_KEY;
     if (!secret) throw Object.assign(new Error('Chapa is not configured. Add CHAPA_SECRET_KEY to .env.'), { status: 503 });
-    const response = await fetch(`https://api.chapa.co/v1/transaction/verify/${encodeURIComponent(transactionReference)}`, {
+    const response = await fetch(`${CHAPA_API_BASE}/payments/${encodeURIComponent(paymentReference)}/verify`, {
         headers: { Authorization: `Bearer ${secret}` },
         signal: AbortSignal.timeout(15000)
     });
     const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw Object.assign(new Error('Chapa verification request failed.'), { status: 502 });
+    if (!response.ok) throw Object.assign(new Error(`Chapa verification failed: ${result?.message || response.status}`), { status: 502 });
     return result;
+}
+
+function paymentReferenceFromCheckoutUrl(checkoutUrl) {
+    const match = String(checkoutUrl || '').match(/\/([^/?#]+)\/?$/);
+    return match ? match[1] : null;
 }
 
 async function reconcilePayment(transactionReference) {
     const [matches] = await pool.execute(
-        'SELECT id, total_amount, payment_status, status, public_token FROM orders WHERE transaction_reference = ?',
+        'SELECT id, table_number, total_amount, payment_status, status, public_token, provider_reference FROM orders WHERE transaction_reference = ?',
         [transactionReference]
     );
     const order = matches[0];
     if (!order) return { found: false };
     if (order.payment_status === 'paid') return { found: true, paid: true, orderId: order.id, publicToken: order.public_token };
 
-    const verification = await verifyWithChapa(transactionReference);
+    const verification = await verifyWithChapa(order.provider_reference || transactionReference);
     if (!verificationMatches(verification, transactionReference, order.total_amount)) {
         const providerStatus = String(verification?.data?.status ?? verification?.status ?? '').toLowerCase();
-        const providerReference = verification?.data?.reference ?? verification?.data?.ref_id ?? null;
-        if (['failed', 'cancelled', 'expired', 'reversed', 'success'].includes(providerStatus)) {
+        const providerReference = verification?.data?.chapa_reference ?? verification?.data?.reference ?? null;
+        if (['failed', 'cancelled', 'expired', 'reversed'].includes(providerStatus)) {
             await pool.execute(
                 `UPDATE orders SET payment_status = 'failed', status = 'cancelled', provider_reference = ?
                  WHERE id = ? AND payment_status <> 'paid'`,
                 [providerReference, order.id]
             );
+            await releaseTableIfIdle(pool, order.table_number);
             io.to('staff').emit('order_status_updated', { id: order.id, status: 'cancelled', payment_status: 'failed' });
         }
         return { found: true, paid: false, orderId: order.id, publicToken: order.public_token };
     }
 
-    const providerReference = verification?.data?.reference ?? verification?.data?.ref_id ?? null;
+    const providerReference = verification?.data?.chapa_reference ?? verification?.data?.reference ?? null;
     const [updated] = await pool.execute(
         `UPDATE orders SET payment_status = 'paid', status = 'in_kitchen', provider_reference = ?
          WHERE id = ? AND transaction_reference = ? AND payment_status = 'processing' AND status = 'pending_approval'`,
@@ -228,9 +285,11 @@ app.post('/api/auth/login', async (req, res, next) => {
         const email = String(req.body.email || '').trim().toLowerCase();
         const password = String(req.body.password || '');
         if (!['admin', 'cashier', 'waiter'].includes(role) || !email || !password) return sendError(res, 400, 'Choose a role and enter your email and password.');
+        if (loginRateLimited(`${req.ip}|${email}`)) return sendError(res, 429, 'Too many sign-in attempts. Please wait 15 minutes and try again.');
         const [users] = await pool.execute('SELECT id, name, email, role, password_hash FROM users WHERE email = ? AND role = ? LIMIT 1', [email, role]);
         const user = users[0];
-        if (!user || !passwordMatches(password, user.password_hash)) return sendError(res, 401, 'Those sign-in details do not match.');
+        const passwordOk = passwordMatches(password, user ? user.password_hash : dummyHash);
+        if (!user || !passwordOk) return sendError(res, 401, 'Those sign-in details do not match.');
         attachSession(res, user);
         res.json({ user: { id: user.id, name: user.name, role: user.role } });
     } catch (error) { next(error); }
@@ -241,7 +300,7 @@ app.get('/api/auth/session', requireRole('admin', 'cashier', 'waiter'), (req, re
 });
 
 app.post('/api/auth/logout', (req, res) => {
-    res.setHeader('Set-Cookie', 'ember_session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0');
+    res.setHeader('Set-Cookie', `seba_session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`);
     res.status(204).end();
 });
 
@@ -257,12 +316,8 @@ app.get('/api/menu-items', async (req, res, next) => {
     } catch (error) { next(error); }
 });
 
-app.post('/api/orders', (req, res, next) => receiptUpload.single('receipt_image')(req, res, error => {
-    if (error) return sendError(res, error.code === 'LIMIT_FILE_SIZE' ? 413 : 400, 'Upload one JPG, PNG, or WebP receipt image up to 5 MB.');
-    next();
-}), async (req, res, next) => {
+app.post('/api/orders', async (req, res, next) => {
     const connection = await pool.getConnection();
-    let receiptFilePath;
     let committed = false;
     try {
         const orderType = req.body.order_type === 'waiter_assisted' ? 'waiter_assisted' : 'qr_self_service';
@@ -280,10 +335,6 @@ app.post('/api/orders', (req, res, next) => receiptUpload.single('receipt_image'
         if (!/^\d{1,10}$/.test(tableNumber)) return sendError(res, 400, 'Choose a valid table.');
         if (!['cash', 'digital_aggregator', 'telebirr_transfer', 'cbe_transfer'].includes(paymentMethod)) return sendError(res, 400, 'Choose a supported payment method.');
         const isTransfer = ['telebirr_transfer', 'cbe_transfer'].includes(paymentMethod);
-        if (isTransfer && !req.file) return sendError(res, 400, 'Attach your transfer receipt screenshot.');
-        if (!isTransfer && req.file) return sendError(res, 400, 'Receipt screenshots are only accepted for manual transfers.');
-        const receiptType = req.file ? receiptImageType(req.file.buffer) : null;
-        if (req.file && (!receiptType || req.file.mimetype !== receiptType.mime)) return sendError(res, 400, 'The uploaded file is not a supported receipt image.');
         if (paymentMethod === 'digital_aggregator' && !process.env.CHAPA_SECRET_KEY) return sendError(res, 503, 'Digital payment is not configured yet. Add a Chapa secret key to the server environment.');
         if (!Array.isArray(requested) || requested.length < 1 || requested.length > 50) return sendError(res, 400, 'Add at least one menu item.');
         const quantities = new Map();
@@ -315,17 +366,11 @@ app.post('/api/orders', (req, res, next) => receiptUpload.single('receipt_image'
         }
         const total = items.reduce((sum, item) => sum + moneyInCents(item.price) * quantities.get(item.id), 0);
         const publicToken = crypto.randomBytes(32).toString('hex');
-        if (req.file) {
-            const fileName = `${crypto.randomUUID()}.${receiptType.extension}`;
-            receiptFilePath = path.join(receiptDirectory, fileName);
-            await fs.mkdir(receiptDirectory, { recursive: true });
-            await fs.writeFile(receiptFilePath, req.file.buffer, { flag: 'wx' });
-        }
         const paymentStatus = isTransfer ? 'pending_approval' : 'unpaid';
         const [created] = await connection.execute(
-            `INSERT INTO orders (public_token, table_number, order_type, payment_method, payment_status, payment_screenshot_url, status, total_amount)
-             VALUES (?, ?, ?, ?, ?, ?, 'pending_approval', ?)`,
-            [publicToken, normalizedTable, orderType, paymentMethod, paymentStatus, req.file ? path.basename(receiptFilePath) : null, (total / 100).toFixed(2)]
+            `INSERT INTO orders (public_token, table_number, order_type, payment_method, payment_status, status, total_amount)
+             VALUES (?, ?, ?, ?, ?, 'pending_approval', ?)`,
+            [publicToken, normalizedTable, orderType, paymentMethod, paymentStatus, (total / 100).toFixed(2)]
         );
         for (const item of items) {
             await connection.execute(
@@ -341,7 +386,6 @@ app.post('/api/orders', (req, res, next) => receiptUpload.single('receipt_image'
         res.status(201).json({ order_id: order.id, public_token: publicToken, payment_status: order.payment_status, total_amount: order.total_amount });
     } catch (error) {
         await connection.rollback().catch(() => { });
-        if (receiptFilePath && !committed) await fs.unlink(receiptFilePath).catch(() => { });
         next(error);
     } finally {
         connection.release();
@@ -352,7 +396,16 @@ app.get('/api/payment-details', (req, res) => {
     res.json({
         account_name: process.env.BANK_ACCOUNT_NAME || '',
         telebirr_account: process.env.TELEBIRR_ACCOUNT || '',
-        cbe_account: process.env.CBE_ACCOUNT || ''
+        cbe_account: process.env.CBE_ACCOUNT || '',
+        online_enabled: Boolean(process.env.CHAPA_SECRET_KEY),
+        online_channels: [...Object.keys(DIRECT_CHANNELS), HOSTED_CHANNEL]
+    });
+});
+
+app.get('/api/menu-items/:fileName', (req, res, next) => {
+    if (/[\\/]/.test(req.params.fileName)) return sendError(res, 400, 'Invalid file name.');
+    res.sendFile(path.join(itemImageDirectory, req.params.fileName), error => {
+        if (error && !res.headersSent) sendError(res, 404, 'Image not found.');
     });
 });
 
@@ -360,46 +413,108 @@ app.post('/api/payments/initialize', async (req, res, next) => {
     try {
         const orderId = Number(req.body.order_id);
         const publicToken = String(req.body.public_token || '');
-        const firstName = String(req.body.first_name || '').trim();
-        const lastName = String(req.body.last_name || '').trim();
+        const firstName = String(req.body.first_name || '').trim().slice(0, 100);
+        const lastName = String(req.body.last_name || '').trim().slice(0, 100);
         const email = String(req.body.email || '').trim();
-        const phone = normalizeEthiopianMobile(req.body.phone_number);
         const paymentChannel = String(req.body.payment_channel || '').toLowerCase();
+        const hosted = paymentChannel === HOSTED_CHANNEL;
+        // v2 has no direct-charge endpoint, so a wallet choice becomes a preference on the
+        // hosted page. The phone number is optional and normalised to Chapa's 251 format.
+        const phone = chapaPhoneNumber(req.body.phone_number);
         if (!process.env.CHAPA_SECRET_KEY) return sendError(res, 503, 'Digital payment is not configured yet. Add a Chapa secret key to the server environment.');
-        if (!Number.isInteger(orderId) || !phone) return sendError(res, 400, 'Enter a valid Ethiopian mobile number such as 0912345678.');
-        if (!['telebirr', 'cbebirr'].includes(paymentChannel)) return sendError(res, 400, 'Choose Telebirr or CBE Birr for the phone prompt.');
+        if (!isSupportedChannel(paymentChannel)) return sendError(res, 400, 'Choose a supported payment provider.');
+        if (!Number.isInteger(orderId)) return sendError(res, 400, 'Invalid order.');
+        if (req.body.phone_number && !phone) return sendError(res, 400, 'Enter a valid Ethiopian mobile number such as 0912345678.');
         if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return sendError(res, 400, 'Enter a valid email address.');
         const order = await readOrder(orderId);
-        if (!order || order.public_token !== publicToken || order.payment_method !== 'digital_aggregator') return sendError(res, 404, 'Digital order not found.');
-        if (order.payment_status === 'paid' || order.status !== 'pending_approval') return sendError(res, 409, 'This order can no longer be paid.');
-        const transactionReference = `ember-${crypto.randomUUID()}`;
-        await pool.execute(
-            `UPDATE orders SET payment_status = 'processing', transaction_reference = ?, payment_channel = ?,
-             customer_first_name = ?, customer_last_name = ?, customer_email = ? WHERE id = ?`,
+        if (!order || order.public_token !== publicToken) return sendError(res, 404, 'Order not found.');
+        // Full payment (digital order) or "pay my bill online" for a cash order that is still unpaid.
+        const originalMethod = order.payment_method;
+        const payableCash = originalMethod === 'cash' && order.payment_status === 'unpaid';
+        const payableDigital = originalMethod === 'digital_aggregator' && ['unpaid', 'processing'].includes(order.payment_status);
+        if (!(payableCash || payableDigital) || order.status !== 'pending_approval') return sendError(res, 409, 'This order can no longer be paid online.');
+        const minimum = MINIMUM_ETB[paymentChannel] || 1;
+        if (order.total_amount < minimum) return sendError(res, 400, `${DIRECT_CHANNELS[paymentChannel] || 'This method'} needs an order of at least ETB ${minimum}. Choose another method.`);
+
+        const transactionReference = merchantReference('seba');
+        const [claimed] = await pool.execute(
+            `UPDATE orders SET payment_method = 'digital_aggregator', payment_status = 'processing', transaction_reference = ?, payment_channel = ?,
+             customer_first_name = ?, customer_last_name = ?, customer_email = ?
+             WHERE id = ? AND status = 'pending_approval' AND payment_status IN ('unpaid', 'processing')`,
             [transactionReference, paymentChannel, firstName || null, lastName || null, email || null, orderId]
         );
-        const payload = new FormData();
-        payload.set('amount', order.total_amount.toFixed(2));
-        payload.set('currency', 'ETB');
-        payload.set('mobile', phone);
-        payload.set('tx_ref', transactionReference);
-        const response = await fetch(`https://api.chapa.co/v1/charges?type=${paymentChannel}`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${process.env.CHAPA_SECRET_KEY}` },
-            body: payload,
-            signal: AbortSignal.timeout(15000)
-        });
-        const result = await response.json().catch(() => ({}));
-        if (!response.ok || !chargeWasInitiated(result)) {
-            await pool.execute(
-                `UPDATE orders SET payment_status = 'failed', status = 'cancelled'
-                 WHERE id = ? AND transaction_reference = ? AND payment_status = 'processing'`,
-                [orderId, transactionReference]
-            );
-            return sendError(res, 502, 'Chapa could not send the phone approval prompt. Check the number and merchant account, then try again.');
+        if (!claimed.affectedRows) return sendError(res, 409, 'This order can no longer be paid online.');
+
+        const failCharge = async () => {
+            if (payableCash) {
+                // The customer can still pay at the counter.
+                await pool.execute(
+                    `UPDATE orders SET payment_method = 'cash', payment_status = 'unpaid', transaction_reference = NULL, payment_channel = NULL
+                     WHERE id = ? AND transaction_reference = ? AND payment_status = 'processing'`,
+                    [orderId, transactionReference]
+                );
+            } else {
+                await pool.execute(
+                    `UPDATE orders SET payment_status = 'failed', status = 'cancelled'
+                     WHERE id = ? AND transaction_reference = ? AND payment_status = 'processing'`,
+                    [orderId, transactionReference]
+                );
+                await releaseTableIfIdle(pool, order.table_number);
+            }
+        };
+
+        let response;
+        let result;
+        try {
+            response = await fetch(`${CHAPA_API_BASE}/payments/hosted`, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${process.env.CHAPA_SECRET_KEY}`,
+                    'Content-Type': 'application/json',
+                    // Required by v2; reusing the order's reference keeps retries idempotent.
+                    'Idempotency-Key': transactionReference
+                },
+                body: JSON.stringify(hostedPaymentBody({
+                    amount: order.total_amount,
+                    reference: transactionReference,
+                    email,
+                    firstName,
+                    lastName,
+                    phone,
+                    channel: paymentChannel,
+                    callbackUrl: publicBaseUrl.startsWith('https://') ? `${publicBaseUrl}/api/payments/callback` : 'https://example.com/callback',
+                    returnUrl: publicBaseUrl.startsWith('https://') ? `${publicBaseUrl}/api/payments/callback?trx_ref=${encodeURIComponent(transactionReference)}` : 'https://example.com/return',
+                    orderId,
+                    tableNumber: order.table_number
+                })),
+                signal: AbortSignal.timeout(15000)
+            });
+            result = await response.json().catch(() => ({}));
+        } catch (networkError) {
+            await failCharge();
+            return sendError(res, 502, 'Could not reach Chapa. Please try again in a moment.');
+        }
+        if (!response.ok || !checkoutWasCreated(result)) {
+            await failCharge();
+            // Surface Chapa's own reason: it distinguishes an expired key from a bad payload.
+            const detail = result?.error?.code ? `${result.error.code}: ${result.message || ''}`.trim() : (result?.message || '');
+            console.error('Chapa hosted checkout failed:', response.status, detail || '(no message)');
+            return sendError(res, 502, detail
+                ? `Chapa could not start the payment: ${detail}`
+                : 'Chapa could not open the payment page. Please try again or choose another method.');
+        }
+        const paymentReference = paymentReferenceFromCheckoutUrl(result.data.checkout_url);
+        if (paymentReference) {
+            await pool.execute('UPDATE orders SET provider_reference = ? WHERE id = ? AND transaction_reference = ?', [paymentReference, orderId, transactionReference]);
         }
         io.to('staff').emit('order_status_updated', { id: orderId, status: 'pending_approval', payment_status: 'processing' });
-        res.json({ payment_status: 'processing', public_token: order.public_token, transaction_reference: transactionReference, payment_channel: paymentChannel });
+        res.json({
+            payment_status: 'processing',
+            public_token: order.public_token,
+            transaction_reference: transactionReference,
+            payment_channel: paymentChannel,
+            checkout_url: result.data.checkout_url
+        });
     } catch (error) { next(error); }
 });
 
@@ -485,7 +600,10 @@ app.get('/api/admin/tables', requireRole('admin'), async (req, res, next) => {
     } catch (error) { next(error); }
 });
 
-app.post('/api/admin/menu-items', requireRole('admin'), async (req, res, next) => {
+app.post('/api/admin/menu-items', requireRole('admin'), (req, res, next) => itemImageUpload.single('image')(req, res, error => {
+    if (error) return sendError(res, error.code === 'LIMIT_FILE_SIZE' ? 413 : 400, 'Upload one JPG, PNG, or WebP image up to 5 MB.');
+    next();
+}), async (req, res, next) => {
     try {
         const name = String(req.body.name || '').trim();
         const category = String(req.body.category || '').trim();
@@ -493,9 +611,16 @@ app.post('/api/admin/menu-items', requireRole('admin'), async (req, res, next) =
         if (!name || name.length > 150 || !category || category.length > 100 || !Number.isFinite(price) || price <= 0) return sendError(res, 400, 'Enter an item name, category, and positive price.');
         const [categoryResult] = await pool.execute('INSERT INTO categories (name) VALUES (?) ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)', [category]);
         const categoryId = categoryResult.insertId;
+        let imageUrl = null;
+        if (req.file) {
+            const fileName = `${crypto.randomUUID()}${path.extname(req.file.originalname || '')}`;
+            await fs.mkdir(itemImageDirectory, { recursive: true });
+            await fs.writeFile(path.join(itemImageDirectory, fileName), req.file.buffer, { flag: 'wx' });
+            imageUrl = `/api/menu-items/${fileName}`;
+        }
         const [created] = await pool.execute(
             `INSERT INTO menu_items (category_id, name, price, description, image_url, status) VALUES (?, ?, ?, ?, ?, 'in_stock')`,
-            [categoryId, name, price.toFixed(2), String(req.body.description || '').slice(0, 255), null]
+            [categoryId, name, price.toFixed(2), String(req.body.description || '').slice(0, 255), imageUrl]
         );
         const [rows] = await pool.execute('SELECT id, name, status FROM menu_items WHERE id = ?', [created.insertId]);
         io.emit('menu_item_updated', rows[0]);
@@ -513,6 +638,11 @@ app.patch('/api/admin/menu-items/:id/availability', requireRole('admin'), async 
         io.emit('menu_item_updated', rows[0]);
         res.json(rows[0]);
     } catch (error) { next(error); }
+});
+
+app.param('id', (req, res, next, value) => {
+    if (!/^\d{1,10}$/.test(value)) return sendError(res, 400, 'Invalid id.');
+    next();
 });
 
 app.get('/api/cashier/orders/:id/receipt', requireRole('cashier', 'admin'), async (req, res, next) => {
@@ -666,8 +796,11 @@ async function start() {
         sessionSecret = crypto.randomBytes(48).toString('base64url');
         console.warn('SESSION_SECRET is unset or a placeholder; generated an ephemeral development secret. Staff sessions reset when the server restarts.');
     }
+    if (!publicBaseUrl.startsWith('https://')) console.warn('PUBLIC_BASE_URL is not https: Chapa cannot send customers back or call the webhook. Use an HTTPS tunnel for payment tests.');
     await pool.query('SELECT 1');
     await bootstrapStaff();
+    await cancelAbandonedOrders().catch(error => console.error('Cleanup failed:', error.message));
+    setInterval(() => cancelAbandonedOrders().catch(error => console.error('Cleanup failed:', error.message)), 5 * 60 * 1000).unref();
     const host = process.env.HOST || '127.0.0.1';
     try {
         await new Promise((resolve, reject) => {
@@ -678,14 +811,14 @@ async function start() {
                 resolve();
             });
         });
-        console.log(`EMBER KITCHEN API listening at http://localhost:${port}`);
+        console.log(`SEBA CAFE API listening at http://localhost:${port}`);
     } catch (error) {
         if (error.code !== 'EADDRINUSE') throw error;
         try {
             const healthResponse = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(2000) });
             const health = await healthResponse.json();
             if (healthResponse.ok && health.status === 'ok') {
-                console.log(`EMBER KITCHEN is already running at http://localhost:${port}`);
+                console.log(`SEBA CAFE is already running at http://localhost:${port}`);
                 await pool.end();
                 return;
             }

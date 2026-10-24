@@ -5703,3 +5703,6 @@ a.cashier-utility-link {
     height: 28px;
   }
 }
+
+#paybill-form { display: grid; gap: 12px; margin: 18px auto; max-width: 440px; text-align: left; }
+#paybill-form .gateway-options { margin-left: 0; justify-content: center; }
