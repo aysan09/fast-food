@@ -18,12 +18,6 @@ const port = Number(process.env.PORT || 3000);
 const publicBaseUrl = (process.env.PUBLIC_BASE_URL || `http://localhost:${port}`).replace(/\/$/, '');
 let sessionSecret = process.env.SESSION_SECRET || '';
 const root = __dirname;
-const receiptDirectory = path.join(root, 'uploads', 'payment-receipts');
-const receiptUpload = multer({
-    storage: multer.memoryStorage(),
-    limits: { fileSize: 5 * 1024 * 1024, files: 1 },
-    fileFilter: (req, file, callback) => callback(null, ['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype))
-});
 const itemImageDirectory = path.join(root, 'uploads', 'menu-items');
 const itemImageUpload = multer({
     storage: multer.memoryStorage(),
@@ -148,7 +142,6 @@ async function bootstrapStaff() {
 async function readOrder(orderId, connection = pool) {
     const [rows] = await connection.execute(
         `SELECT o.id, o.public_token, o.table_number, o.order_type, o.payment_method, o.payment_status,
-            o.payment_screenshot_url,
                 o.status, o.transaction_reference, o.total_amount, o.created_at,
                 oi.menu_item_id, mi.name, oi.quantity, oi.unit_price
          FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.id
@@ -164,20 +157,12 @@ async function readOrder(orderId, connection = pool) {
         order_type: first.order_type,
         payment_method: first.payment_method,
         payment_status: first.payment_status,
-        payment_screenshot_url: first.payment_screenshot_url ? `/api/cashier/orders/${first.id}/receipt` : null,
         status: first.status,
         transaction_reference: first.transaction_reference,
         total_amount: Number(first.total_amount),
         created_at: first.created_at,
         lines: rows.filter(row => row.menu_item_id).map(row => ({ menu_item_id: row.menu_item_id, name: row.name, quantity: row.quantity, price: Number(row.unit_price) }))
     };
-}
-
-function receiptImageType(buffer) {
-    if (buffer.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) return { mime: 'image/jpeg', extension: 'jpg' };
-    if (buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return { mime: 'image/png', extension: 'png' };
-    if (buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP') return { mime: 'image/webp', extension: 'webp' };
-    return null;
 }
 
 async function releaseTableIfIdle(connection, tableNumber) {
@@ -428,11 +413,8 @@ app.post('/api/payments/initialize', async (req, res, next) => {
         if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return sendError(res, 400, 'Enter a valid email address.');
         const order = await readOrder(orderId);
         if (!order || order.public_token !== publicToken) return sendError(res, 404, 'Order not found.');
-        // Full payment (digital order) or "pay my bill online" for a cash order that is still unpaid.
-        const originalMethod = order.payment_method;
-        const payableCash = originalMethod === 'cash' && order.payment_status === 'unpaid';
-        const payableDigital = originalMethod === 'digital_aggregator' && ['unpaid', 'processing'].includes(order.payment_status);
-        if (!(payableCash || payableDigital) || order.status !== 'pending_approval') return sendError(res, 409, 'This order can no longer be paid online.');
+        // Only the full online payment of a digital order can be initialized here.
+        if (order.payment_method !== 'digital_aggregator' || !['unpaid', 'processing'].includes(order.payment_status) || order.status !== 'pending_approval') return sendError(res, 409, 'This order can no longer be paid online.');
         const minimum = MINIMUM_ETB[paymentChannel] || 1;
         if (order.total_amount < minimum) return sendError(res, 400, `${DIRECT_CHANNELS[paymentChannel] || 'This method'} needs an order of at least ETB ${minimum}. Choose another method.`);
 
@@ -446,21 +428,12 @@ app.post('/api/payments/initialize', async (req, res, next) => {
         if (!claimed.affectedRows) return sendError(res, 409, 'This order can no longer be paid online.');
 
         const failCharge = async () => {
-            if (payableCash) {
-                // The customer can still pay at the counter.
-                await pool.execute(
-                    `UPDATE orders SET payment_method = 'cash', payment_status = 'unpaid', transaction_reference = NULL, payment_channel = NULL
-                     WHERE id = ? AND transaction_reference = ? AND payment_status = 'processing'`,
-                    [orderId, transactionReference]
-                );
-            } else {
-                await pool.execute(
-                    `UPDATE orders SET payment_status = 'failed', status = 'cancelled'
-                     WHERE id = ? AND transaction_reference = ? AND payment_status = 'processing'`,
-                    [orderId, transactionReference]
-                );
-                await releaseTableIfIdle(pool, order.table_number);
-            }
+            await pool.execute(
+                `UPDATE orders SET payment_status = 'failed', status = 'cancelled'
+                 WHERE id = ? AND transaction_reference = ? AND payment_status = 'processing'`,
+                [orderId, transactionReference]
+            );
+            await releaseTableIfIdle(pool, order.table_number);
         };
 
         let response;
@@ -567,9 +540,10 @@ app.get('/api/admin/overview', requireRole('admin'), async (req, res, next) => {
     try {
         const [orderRows] = await pool.query(
             `SELECT
-                COALESCE(SUM(CASE WHEN payment_status IN ('paid', 'verified') THEN total_amount ELSE 0 END), 0) AS today_revenue,
+                COALESCE(SUM(CASE WHEN status = 'completed' AND payment_status IN ('paid', 'verified') THEN total_amount ELSE 0 END), 0) AS today_revenue,
                 SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_orders,
-                AVG(CASE WHEN status = 'completed' THEN total_amount ELSE NULL END) AS average_order
+                SUM(CASE WHEN status = 'in_kitchen' OR status = 'ready' THEN 1 ELSE 0 END) AS open_orders,
+                AVG(CASE WHEN status = 'completed' AND payment_status IN ('paid', 'verified') THEN total_amount ELSE NULL END) AS average_order
              FROM orders WHERE created_at >= CURDATE()`
         );
         const [tableRows] = await pool.query(
@@ -580,6 +554,7 @@ app.get('/api/admin/overview', requireRole('admin'), async (req, res, next) => {
         res.json({
             today_revenue: Number(orderRows[0].today_revenue),
             completed_orders: Number(orderRows[0].completed_orders || 0),
+            open_orders: Number(orderRows[0].open_orders || 0),
             average_order: Number(orderRows[0].average_order || 0),
             active_tables: Number(tableRows[0].active_tables || 0),
             total_tables: Number(tableRows[0].total_tables || 0),
@@ -645,45 +620,84 @@ app.param('id', (req, res, next, value) => {
     next();
 });
 
-app.get('/api/cashier/orders/:id/receipt', requireRole('cashier', 'admin'), async (req, res, next) => {
-    try {
-        const [rows] = await pool.execute('SELECT payment_screenshot_url FROM orders WHERE id = ? LIMIT 1', [req.params.id]);
-        const fileName = rows[0]?.payment_screenshot_url;
-        if (!fileName) return sendError(res, 404, 'Receipt image not found.');
-        const receiptPath = path.join(receiptDirectory, path.basename(fileName));
-        const extension = path.extname(receiptPath).toLowerCase();
-        res.set({ 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' });
-        res.type(extension === '.png' ? 'png' : extension === '.webp' ? 'webp' : 'jpg');
-        res.sendFile(receiptPath, error => { if (error && !res.headersSent) sendError(res, 404, 'Receipt image not found.'); });
-    } catch (error) { next(error); }
-});
-
 app.get('/api/cashier/orders', requireRole('cashier', 'admin'), async (req, res, next) => {
     try {
         const status = String(req.query.status || '');
         if (status && !['pending_approval', 'in_kitchen', 'ready'].includes(status)) return sendError(res, 400, 'Choose a valid order status.');
+        // Cash awaits confirmation, transfers await verification, and online payments that are still
+        // being confirmed must all stay visible to staff. Only failed or cancelled orders drop out.
+        const visiblePayment = `(o.payment_method = 'cash' AND o.payment_status IN ('unpaid', 'pending_approval'))
+            OR (o.payment_method IN ('telebirr_transfer', 'cbe_transfer') AND o.payment_status IN ('pending_approval', 'verified', 'paid'))
+            OR (o.payment_method = 'digital_aggregator' AND o.payment_status IN ('unpaid', 'processing', 'paid'))`;
         const where = status === 'pending_approval'
-            ? `o.status = 'pending_approval' AND (o.payment_method = 'cash' OR (o.payment_method IN ('telebirr_transfer', 'cbe_transfer') AND o.payment_status = 'pending_approval'))`
-            : status ? 'o.status = ?' : `o.status IN ('in_kitchen', 'ready') OR (o.status = 'pending_approval' AND (o.payment_method = 'cash' OR (o.payment_method IN ('telebirr_transfer', 'cbe_transfer') AND o.payment_status = 'pending_approval')))`;
+            ? `o.status = 'pending_approval' AND (${visiblePayment})`
+            : status ? 'o.status = ?' : `(o.status IN ('in_kitchen', 'ready') OR (o.status = 'pending_approval' AND (${visiblePayment})))`;
         const [rows] = await pool.execute(
-            `SELECT o.id, o.table_number, o.order_type, o.payment_method, o.payment_status, o.payment_screenshot_url, o.status, o.total_amount, o.created_at,
-                    oi.quantity, oi.unit_price, m.name
+            `SELECT o.id, o.table_number, o.order_type, o.payment_method, o.payment_status, o.status, o.total_amount, o.created_at,
+                    t.status AS table_status, oi.quantity, oi.unit_price, m.name
              FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.id
              LEFT JOIN menu_items m ON m.id = oi.menu_item_id
+             LEFT JOIN restaurant_tables t ON t.table_number = o.table_number
              WHERE ${where} ORDER BY o.created_at DESC, oi.id`,
             status && status !== 'pending_approval' ? [status] : []
         );
         const grouped = new Map();
         for (const row of rows) {
             if (!grouped.has(row.id)) grouped.set(row.id, {
-                id: row.id, table_number: row.table_number, source: row.order_type === 'waiter_assisted' ? 'Waiter' : 'QR menu',
+                id: row.id, table_number: row.table_number, table_status: row.table_status || 'available',
+                source: row.order_type === 'waiter_assisted' ? 'Waiter' : 'QR menu',
                 payment_method: row.payment_method, payment_status: row.payment_status, status: row.status,
-                payment_screenshot_url: row.payment_screenshot_url ? `/api/cashier/orders/${row.id}/receipt` : null,
                 total_amount: Number(row.total_amount), created_at: row.created_at, lines: []
             });
             if (row.name) grouped.get(row.id).lines.push({ name: row.name, quantity: row.quantity, price: Number(row.unit_price) });
         }
         res.json({ orders: [...grouped.values()] });
+    } catch (error) { next(error); }
+});
+
+app.get('/api/cashier/report', requireRole('cashier', 'admin'), async (req, res, next) => {
+    try {
+        const requested = String(req.query.date || '').trim();
+        if (requested && !/^\d{4}-\d{2}-\d{2}$/.test(requested)) return sendError(res, 400, 'Choose a valid report date.');
+        // Use the database clock so "today" matches the rows, not the time zone of either process.
+        // CAST keeps these as plain YYYY-MM-DD strings instead of JS Date objects.
+        const [[clock]] = await pool.query('SELECT CAST(CURDATE() AS CHAR) AS today');
+        const today = clock.today;
+        const [latestRows] = await pool.query(
+            "SELECT CAST(DATE_FORMAT(MAX(created_at), '%Y-%m-%d') AS CHAR) AS latest FROM orders WHERE status = 'completed'"
+        );
+        const latestCompleted = latestRows[0].latest;
+        const date = requested || today;
+        // Only orders a cashier actually finished count; a completed order is always paid or verified by then.
+        const [rows] = await pool.execute(
+            `SELECT id, table_number, order_type, payment_method, payment_status, total_amount, created_at
+             FROM orders WHERE status = 'completed' AND DATE(created_at) = ? ORDER BY created_at DESC`,
+            [date]
+        );
+        const completed = rows.map(row => ({
+            id: row.id,
+            table_number: row.table_number,
+            source: row.order_type === 'waiter_assisted' ? 'Waiter' : 'QR menu',
+            payment_method: row.payment_method,
+            payment_status: row.payment_status,
+            total_amount: Number(row.total_amount),
+            created_at: row.created_at
+        }));
+        const paidOrders = completed.filter(row => ['paid', 'verified'].includes(row.payment_status));
+        const cents = paidOrders.reduce((sum, row) => sum + moneyInCents(row.total_amount), 0);
+        const byMethod = {};
+        for (const row of paidOrders) byMethod[row.payment_method] = (byMethod[row.payment_method] || 0) + moneyInCents(row.total_amount);
+        res.json({
+            date,
+            today,
+            latest_completed_date: latestCompleted || null,
+            completed_count: completed.length,
+            paid_count: paidOrders.length,
+            total_amount: Number((cents / 100).toFixed(2)),
+            average_amount: paidOrders.length ? Number((cents / 100 / paidOrders.length).toFixed(2)) : 0,
+            by_method: byMethod,
+            orders: completed
+        });
     } catch (error) { next(error); }
 });
 

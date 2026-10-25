@@ -74,7 +74,14 @@ INSERT INTO restaurant_tables (table_number, qr_code_url) VALUES
 ('04', '/?table=04#/menu'), ('05', '/?table=05#/menu'), ('06', '/?table=06#/menu'),
 ('07', '/?table=07#/menu'), ('08', '/?table=08#/menu'), ('09', '/?table=09#/menu'),
 ('10', '/?table=10#/menu'), ('11', '/?table=11#/menu'), ('12', '/?table=12#/menu'),
-('13', '/?table=13#/menu'), ('14', '/?table=14#/menu')
+('13', '/?table=13#/menu'), ('14', '/?table=14#/menu'), ('15', '/?table=15#/menu'),
+('16', '/?table=16#/menu'), ('17', '/?table=17#/menu'), ('18', '/?table=18#/menu'),
+('19', '/?table=19#/menu'), ('20', '/?table=20#/menu'), ('21', '/?table=21#/menu'),
+('22', '/?table=22#/menu'), ('23', '/?table=23#/menu'), ('24', '/?table=24#/menu'),
+('25', '/?table=25#/menu'), ('26', '/?table=26#/menu'), ('27', '/?table=27#/menu'),
+('28', '/?table=28#/menu'), ('29', '/?table=29#/menu'), ('30', '/?table=30#/menu'),
+('31', '/?table=31#/menu'), ('32', '/?table=32#/menu'), ('33', '/?table=33#/menu'),
+('34', '/?table=34#/menu'), ('35', '/?table=35#/menu'), ('36', '/?table=36#/menu')
 ON DUPLICATE KEY UPDATE qr_code_url = VALUES(qr_code_url);
 
 INSERT INTO categories (name, display_order) VALUES

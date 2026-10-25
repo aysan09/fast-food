@@ -33,7 +33,7 @@ Open `http://localhost:3000`. Staff passwords must be at least 8 characters in p
 - The customer return screen polls `GET /api/orders/public/:token` while the prompt is pending. The signed webhook causes the server to verify the transaction with Chapa; the order advances to `paid` and `in_kitchen` only when reference, ETB amount, and currency match the database order.
 - Successful verification emits `order_paid` and `order_status_updated` to staff dashboards through Socket.IO.
 - Cash orders remain pending until a cashier explicitly confirms cash receipt.
-- Manual transfer orders require an uploaded JPG, PNG, or WebP receipt (up to 5 MB). The image is stored in `uploads/payment-receipts` and is served only to signed-in cashiers and admins. Cashiers compare the receipt with the bank notification, then approve it into the kitchen or reject it with an optional reason.
+- Manual transfer orders require no upload. The customer transfers to the restaurant account, places the order, and the cashier compares the bank notification with the order total, then approves it into the kitchen or rejects it with an optional reason.
 - Configure restaurant transfer account details in `.env`; these values are public checkout instructions, not payment credentials.
 
 ## Payment providers (Chapa)
@@ -41,7 +41,6 @@ Open `http://localhost:3000`. Staff passwords must be at least 8 characters in p
 Customers can pay online with Telebirr, CBE Birr, Coopay-Ebirr, M-Pesa, or Awash Birr (phone prompt via Chapa Direct Charge), or choose **Bank, card & more**, which opens Chapa's hosted secure page for banks, cards, and other wallets.
 
 - **Full payment:** the customer pays the whole order total at checkout.
-- **Bill payment:** a customer who chose cash can open **Pay my bill online** on the confirmation page and settle the same order with any provider above. If the online attempt fails, the order returns to cash-at-counter.
 - M-Pesa requires at least ETB 20. Test every provider in Chapa's sandbox before going live; the hosted page return and webhook both verify the transaction with Chapa before the kitchen is notified.
 
 ## API
@@ -56,7 +55,7 @@ Customers can pay online with Telebirr, CBE Birr, Coopay-Ebirr, M-Pesa, or Awash
 - `GET /api/admin/overview`, `GET /api/admin/tables`, and `GET /api/admin/menu-items` (admin session)
 - `POST /api/admin/menu-items` and `PATCH /api/admin/menu-items/:id/availability` (admin session)
 - `GET /api/cashier/orders` (optional `?status=pending_approval`) and `PATCH /api/cashier/orders/:id/approve` (cashier/admin session)
-- `PATCH /api/cashier/orders/:id/verify-payment` and `GET /api/cashier/orders/:id/receipt` (cashier/admin session)
+- `PATCH /api/cashier/orders/:id/verify-payment` (cashier/admin session)
 - `PATCH /api/cashier/orders/:id/advance` (cashier/admin session)
 
 Run the payment signature/parity tests with `npm test`.

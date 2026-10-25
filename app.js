@@ -1,19 +1,25 @@
-const money = amount => `ETB ${Number(amount).toLocaleString('en-ET')}`;
+﻿const money = amount => `ETB ${Number(amount).toLocaleString('en-ET')}`;
 const esc = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 let menuItems = [];
 let orders = [];
-let adminOverview = { today_revenue: 0, completed_orders: 0, average_order: 0, active_tables: 0, total_tables: 0 };
+let adminOverview = { today_revenue: 0, completed_orders: 0, open_orders: 0, average_order: 0, active_tables: 0, total_tables: 0 };
+let cashierReport = { date: '', completed_count: 0, paid_count: 0, total_amount: 0, average_amount: 0, by_method: {}, orders: [] };
 let adminTables = [];
 let currentUser = null;
 let cart = {};
 let waiterCart = {};
 let waiterPaymentMethod = 'cash';
-let waiterReceiptFile = null;
+
 let activeCategory = 'All items';
 let menuSearch = '';
 let menuSearchOpen = false;
+const TABLE_COUNT = 36;
+const TABLE_NUMBERS = Array.from({ length: TABLE_COUNT }, (_, index) => String(index + 1).padStart(2, '0'));
+function tableOptions(selected) {
+    return TABLE_NUMBERS.map(table => `<option value="${table}" ${selected === table ? 'selected' : ''}>Table ${table}</option>`).join('');
+}
 const requestedTable = new URLSearchParams(location.search).get('table') || new URLSearchParams(location.hash.split('?')[1] || '').get('table') || '05';
-let selectedTable = /^\d{1,2}$/.test(requestedTable) && Number(requestedTable) >= 1 && Number(requestedTable) <= 14 ? requestedTable.padStart(2, '0') : '05';
+let selectedTable = /^\d{1,2}$/.test(requestedTable) && Number(requestedTable) >= 1 && Number(requestedTable) <= TABLE_COUNT ? requestedTable.padStart(2, '0') : '05';
 let checkoutMethod = 'cbe_transfer';
 let paymentChannel = 'telebirr';
 // Chapa v2 only offers hosted checkout, so every channel pre-selects a wallet on Chapa's
@@ -41,7 +47,7 @@ function continuePayment(payment, fallbackToken) {
     location.hash = `/payment-return?token=${encodeURIComponent(payment.public_token || fallbackToken)}`;
 }
 let paymentDetails = { account_name: '', telebirr_account: '', cbe_account: '' };
-let receiptFile = null;
+
 let toastTimer;
 let renderVersion = 0;
 let paymentPollTimer;
@@ -63,11 +69,12 @@ function normalizeOrder(order) {
     return {
         id: String(order.id),
         table: order.table_number,
+        tableStatus: order.table_status || 'occupied',
         source: order.source || (order.order_type === 'waiter_assisted' ? 'Waiter' : 'QR menu'),
         payment: order.payment || (order.payment_method === 'cash' ? 'cash' : 'digital'),
         paymentMethod: order.payment_method,
         paymentStatus: order.payment_status || order.paymentStatus,
-        receiptUrl: order.payment_screenshot_url,
+
         status: order.status,
         createdAt: Date.parse(order.created_at) || Date.now(),
         total: Number(order.total_amount ?? order.total),
@@ -110,14 +117,14 @@ function renderHome() {
     const base = location.href.split('#')[0];
     const qrTarget = `${base}?table=${encodeURIComponent(selectedTable)}#/menu`;
     const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=12&data=${encodeURIComponent(qrTarget)}`;
-    return `${header('<a class="top-link" href="#/menu">Customer menu <span class="arrow">↗</span></a>')}<main class="page home-page"><section class="home-intro"><div><span class="eyebrow">Cafe ordering & POS</span><h1>Good food.<br /><em>Clear orders.</em></h1><p class="intro-copy">A simpler way to run the rush. Take orders at the table, keep the menu in sync, and move every ticket forward.</p><div class="hero-actions"><a class="button button-primary" href="#/menu">Open customer menu <span class="arrow">→</span></a><a class="button button-outline" href="#/cashier">Go to cashier</a></div></div><section class="qr-panel" aria-label="Table QR code"><div class="qr-head"><div><span class="qr-label">Scan to order</span><h2>Table ${esc(selectedTable)}</h2></div><span class="active-tag">Active</span></div><div class="qr-main"><img class="qr-image" src="${qrUrl}" alt="QR code for the Table ${esc(selectedTable)} customer menu" /><div class="qr-info"><p>Menu, right at the table.</p><small>Customers land directly on the menu, with their table already selected.</small></div></div><div class="qr-controls"><label for="qr-table">Preview table</label><select id="qr-table" aria-label="Choose QR table">${Array.from({ length: 14 }, (_, index) => `<option value="${String(index + 1).padStart(2, '0')}" ${selectedTable === String(index + 1).padStart(2, '0') ? 'selected' : ''}>Table ${String(index + 1).padStart(2, '0')}</option>`).join('')}</select><a class="top-link" href="${qrUrl}" target="_blank" rel="noreferrer">Print QR ↗</a></div></section></section><section class="portal-section"><div class="section-heading"><div><span class="eyebrow">Staff access</span><h2>Choose your workspace</h2></div><p>Jump into the right part of service.</p></div><div class="role-grid"><a class="role-card" href="#/cashier"><span class="role-icon">▤</span><span class="role-content"><strong>Cashier</strong><span>Orders, payments & kitchen queue</span></span><span class="role-arrow">→</span></a><a class="role-card" href="#/waiter"><span class="role-icon">＋</span><span class="role-content"><strong>Waiter</strong><span>Build an order for any table</span></span><span class="role-arrow">→</span></a><a class="role-card" href="#/admin"><span class="role-icon">◈</span><span class="role-content"><strong>Admin</strong><span>Menu, availability & store pulse</span></span><span class="role-arrow">→</span></a></div></section><footer class="page-footer">SEBA CAFE · Cafe ordering & POS · Arba Minch, Ethiopia</footer></main>`;
+    return `${header('<a class="top-link" href="#/menu">Customer menu <span class="arrow">↗</span></a>')}<main class="page home-page"><section class="home-intro"><div><span class="eyebrow">Cafe ordering & POS</span><h1>Good food.<br /><em>Clear orders.</em></h1><p class="intro-copy">A simpler way to run the rush. Take orders at the table, keep the menu in sync, and move every ticket forward.</p><div class="hero-actions"><a class="button button-primary" href="#/menu">Open customer menu <span class="arrow">→</span></a><a class="button button-outline" href="#/cashier">Go to cashier</a></div></div><section class="qr-panel" aria-label="Table QR code"><div class="qr-head"><div><span class="qr-label">Scan to order</span><h2>Table ${esc(selectedTable)}</h2></div><span class="active-tag">Active</span></div><div class="qr-main"><img class="qr-image" src="${qrUrl}" alt="QR code for the Table ${esc(selectedTable)} customer menu" /><div class="qr-info"><p>Menu, right at the table.</p><small>Customers land directly on the menu, with their table already selected.</small></div></div><div class="qr-controls"><label for="qr-table">Preview table</label><select id="qr-table" aria-label="Choose QR table">${tableOptions(selectedTable)}</select><a class="top-link" href="${qrUrl}" target="_blank" rel="noreferrer">Print QR ↗</a></div></section></section><section class="portal-section"><div class="section-heading"><div><span class="eyebrow">Staff access</span><h2>Choose your workspace</h2></div><p>Jump into the right part of service.</p></div><div class="role-grid"><a class="role-card" href="#/cashier"><span class="role-icon">▤</span><span class="role-content"><strong>Cashier</strong><span>Orders, payments & kitchen queue</span></span><span class="role-arrow">→</span></a><a class="role-card" href="#/waiter"><span class="role-icon">＋</span><span class="role-content"><strong>Waiter</strong><span>Build an order for any table</span></span><span class="role-arrow">→</span></a><a class="role-card" href="#/admin"><span class="role-icon">◈</span><span class="role-content"><strong>Admin</strong><span>Menu, availability & store pulse</span></span><span class="role-arrow">→</span></a></div></section><footer class="page-footer">SEBA CAFE · Cafe ordering & POS · Arba Minch, Ethiopia</footer></main>`;
 }
 
 function renderHomePortal() {
     const base = location.href.split('#')[0];
     const qrTarget = `${base}?table=${encodeURIComponent(selectedTable)}#/menu`;
     const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=360x360&margin=12&data=${encodeURIComponent(qrTarget)}`;
-    const tables = Array.from({ length: 14 }, (_, index) => String(index + 1).padStart(2, '0'));
+    const tables = TABLE_NUMBERS;
     return `<div class="home-portal"><header class="home-portal-header"><a class="brand" href="#/home" aria-label="Seba Cafe home"><span class="brand-mark">S</span><span><span class="brand-name">SEBA CAFE</span><span class="brand-tag">FRESH · LOCAL · EVERY DAY</span></span></a><span class="home-online"><i></i>Cafe online</span></header><main class="home-portal-main"><section class="home-portal-copy"><span class="home-portal-eyebrow">STAFF ACCESS PORTAL</span><h1>Run service.<br /><em>Keep it simple.</em></h1><p>Staff workspaces are private. Choose your role and sign in with your assigned Seba Cafe account.</p><div class="home-access-links"><a class="home-access-card primary" href="#/login?role=cashier"><span class="home-access-icon">▤</span><span><strong>Cashier login</strong><small>Orders &amp; payments</small></span><span class="home-access-arrow">‹</span></a><a class="home-access-card" href="#/login?role=admin"><span class="home-access-icon">▥</span><span><strong>Admin login</strong><small>Reports &amp; menu</small></span><span class="home-access-arrow">‹</span></a></div><a class="home-waiter-link" href="#/login?role=waiter">Waiter sign in</a></section><section class="home-qr-card" aria-label="Customer menu QR code"><header class="home-qr-heading"><div><span>TABLE ${esc(selectedTable)}</span><h2>Customer menu QR</h2></div><span class="home-qr-active">Active</span></header><img class="home-qr-image" src="${qrUrl}" alt="QR code linking customers to the Table ${esc(selectedTable)} menu" /><h3>Scan to order from Table ${esc(selectedTable)}</h3><p>Customers go directly to the menu. Staff dashboards and login links are not shown in their experience.</p><div class="home-qr-actions"><label class="home-table-select"><span class="sr-only">Preview table</span><select id="qr-table" aria-label="Choose QR table">${tables.map(table => `<option value="${table}" ${selectedTable === table ? 'selected' : ''}>Table ${table}</option>`).join('')}</select></label><a href="${qrUrl}" target="_blank" rel="noreferrer" class="home-print-link"><span aria-hidden="true">▦</span>Open printable QR code</a></div></section></main><footer class="home-portal-footer">SEBA CAFE · CAFE ORDERING & POS</footer></div>`;
 }
 
@@ -181,8 +188,8 @@ function renderTransferCheckout() {
     const accountLabel = checkoutMethod === 'cbe_transfer' ? 'CBE account number' : 'Telebirr account';
     const submitDisabled = false;
     const paymentChoices = [
-        ['telebirr_transfer', 'Telebirr transfer', 'Transfer to the restaurant account, then attach your receipt.'],
-        ['cbe_transfer', 'CBE transfer', 'Transfer to the restaurant account, then attach your receipt.'],
+        ['telebirr_transfer', 'Telebirr transfer', 'Transfer to the restaurant account before placing your order.'],
+        ['cbe_transfer', 'CBE transfer', 'Transfer to the restaurant account before placing your order.'],
         ['digital', 'Pay online', 'Continue to Chapa’s secure page.'],
         ['cash', 'Cash at counter', 'Pay the cashier before we start your order.']
     ];
@@ -219,24 +226,15 @@ function renderConfirmation(order) {
     const paid = order.payment_status === 'paid';
     const heading = isTransfer ? 'Transfer received for review.' : paid ? 'Thanks, we’ve got it.' : 'Pay at the counter.';
     const status = isTransfer ? 'Awaiting cashier verification' : paid ? 'Payment confirmed' : 'Cash order received';
-    const message = isTransfer ? 'The cashier will compare your receipt with the bank notification. Your order goes to the kitchen after approval.' : isCash ? 'Show this order to the cashier. It will enter the kitchen once cash is confirmed.' : 'Your verified payment is confirmed. The kitchen has received your order.';
+    const message = isTransfer ? 'The cashier will confirm your transfer with the bank notification. Your order goes to the kitchen after approval.' : isCash ? 'Show this order to the cashier. It will enter the kitchen once cash is confirmed.' : 'Your verified payment is confirmed. The kitchen has received your order.';
     const waiterSubmitted = routeQuery().get('source') === 'waiter';
     const confirmationHeading = waiterSubmitted ? 'Order sent to cashier.' : heading;
     const confirmationStatus = waiterSubmitted ? 'Waiting for cashier' : status;
     const confirmationMessage = waiterSubmitted
-        ? isTransfer ? 'The customer payment receipt was attached. The cashier will verify it and send the order to the kitchen.' : 'The cashier received the order and will confirm the customer’s cash payment before sending it to the kitchen.'
+        ? isTransfer ? 'The cashier will verify the transfer and send the order to the kitchen.' : 'The cashier received the order and will confirm the customer’s cash payment before sending it to the kitchen.'
         : message;
-    const payBillLink = (!waiterSubmitted && isCash && !paid && order.status === 'pending_approval') ? `<a class="button button-outline" href="#/pay-bill?token=${encodeURIComponent(routeQuery().get('token'))}">Pay my bill online</a>` : '';
-    const returnLink = payBillLink + (waiterSubmitted ? '<a class="button button-primary" href="#/waiter">Take another order</a>' : '<a class="button button-primary" href="#/menu">Keep browsing</a>');
+    const returnLink = waiterSubmitted ? '<a class="button button-primary" href="#/waiter">Take another order</a>' : '<a class="button button-primary" href="#/menu">Keep browsing</a>';
     return `${header(`<span class="table-pill">Table ${esc(order.table_number)}</span>`)}<main class="confirmation"><div class="confirmation-mark">${waiterSubmitted ? '✓' : paid ? '✓' : '…'}</div><span class="eyebrow">${confirmationStatus}</span><h1>${confirmationHeading}</h1><p>Order <strong>#${esc(order.order_id)}</strong> for Table ${esc(order.table_number)}<br />${confirmationMessage}</p><div class="checkout-total"><span>Order total</span><span>${money(order.total_amount)}</span></div>${returnLink}</main>`;
-}
-
-function renderPayBill(order) {
-    if (order.payment_status === 'paid' || order.status !== 'pending_approval' || !['cash', 'digital_aggregator'].includes(order.payment_method)) {
-        location.hash = `/confirmation?token=${encodeURIComponent(routeQuery().get('token'))}`;
-        return '<main class="confirmation"><p>Loading your order…</p></main>';
-    }
-    return `${header(`<span class="table-pill">Table ${esc(order.table_number)}</span>`)}<main class="confirmation"><span class="eyebrow">Pay your bill</span><h1>Pay online instead.</h1><p>Order <strong>#${esc(order.order_id)}</strong> · ${money(order.total_amount)}. Choose a provider; your order goes to the kitchen once the payment is confirmed.</p><form id="paybill-form" data-token="${esc(routeQuery().get('token'))}" data-order="${esc(order.order_id)}">${paymentFields()}<button class="button button-primary" type="submit"><span id="paybill-label">${payActionLabel()}</span> <strong>${money(order.total_amount)}</strong></button></form><a class="button button-outline" href="#/confirmation?token=${encodeURIComponent(routeQuery().get('token'))}">Pay at the counter</a></main>`;
 }
 
 function renderPaymentReturn(order) {
@@ -277,13 +275,13 @@ function renderWaiterPaymentReview() {
 
 function renderWaiter() {
     const rows = menuItems.map(item => `<div class="waiter-row"><div><strong>${esc(item.name)}</strong><small>${esc(statusName(item.status))}</small></div><span class="food-price">${money(item.price)}</span><div class="quantity-control"><button data-qty="waiter" data-id="${esc(item.id)}" data-delta="-1" aria-label="Remove one ${esc(item.name)}" ${!waiterCart[item.id] ? 'disabled' : ''}>−</button><span>${waiterCart[item.id] || 0}</span><button data-qty="waiter" data-id="${esc(item.id)}" data-delta="1" aria-label="Add one ${esc(item.name)}" ${available(item) ? '' : 'disabled'}>+</button></div></div>`).join('');
-    return `${layout(`<div class="work-top"><div><span class="breadcrumb">Service / Waiter</span><h1>Build an order</h1><p>Take an order at the table and send it to the cashier for payment.</p></div><div class="work-top-right">${tableBadge()}</div></div><div class="waiter-layout"><section><div class="waiter-controls"><div class="field"><label for="waiter-table">Select table</label><select id="waiter-table" class="field-control">${Array.from({ length: 14 }, (_, index) => `<option value="${String(index + 1).padStart(2, '0')}" ${selectedTable === String(index + 1).padStart(2, '0') ? 'selected' : ''}>Table ${String(index + 1).padStart(2, '0')}</option>`).join('')}</select></div><span class="live-tag"><span class="network-dot"></span>Menu availability live</span></div><div class="waiter-menu">${rows}</div></section>${renderCart(waiterCart, true)}</div>`, 'waiter')}${renderWaiterPaymentReview()}`;
+    return `${layout(`<div class="work-top"><div><span class="breadcrumb">Service / Waiter</span><h1>Build an order</h1><p>Take an order at the table and send it to the cashier for payment.</p></div><div class="work-top-right">${tableBadge()}</div></div><div class="waiter-layout"><section><div class="waiter-controls"><div class="field"><label for="waiter-table">Select table</label><select id="waiter-table" class="field-control">${tableOptions(selectedTable)}</select></div><span class="live-tag"><span class="network-dot"></span>Menu availability live</span></div><div class="waiter-menu">${rows}</div></section>${renderCart(waiterCart, true)}</div>`, 'waiter')}${renderWaiterPaymentReview()}`;
 }
 
 function renderWaiterPortal() {
     const menuRows = menuItems.map(item => `<article class="waiter-row"><div class="waiter-item-info"><strong>${esc(item.name)}</strong><small class="${available(item) ? 'waiter-stock' : 'waiter-out'}">${esc(statusName(item.status))}</small></div><span class="waiter-row-price">${money(item.price)}</span><div class="quantity-control"><button type="button" data-qty="waiter" data-id="${esc(item.id)}" data-delta="-1" aria-label="Remove one ${esc(item.name)}" ${!waiterCart[item.id] ? 'disabled' : ''}>−</button><span>${waiterCart[item.id] || 0}</span><button type="button" data-qty="waiter" data-id="${esc(item.id)}" data-delta="1" aria-label="Add one ${esc(item.name)}" ${available(item) ? '' : 'disabled'}>+</button></div></article>`).join('');
     const waiterName = esc(currentUser?.name || 'Waiter');
-    return `<div class="admin-shell waiter-shell"><aside class="admin-sidebar waiter-sidebar"><a class="admin-brand" href="#/home" aria-label="Seba Cafe home"><span class="admin-brand-mark">S</span><span><strong>SEBA CAFE</strong><small>FRESH · LOCAL · EVERY DAY</small></span></a><div class="admin-role"><span>WORKSPACE</span><strong>Waiter</strong></div><nav class="admin-nav" aria-label="Waiter workspace"><a class="admin-nav-link active" href="#/waiter" aria-current="page"><span>＋</span>New order</a><a class="admin-nav-link" href="#/menu"><span>▣</span>Customer menu</a></nav><div class="admin-sidebar-footer"><button class="admin-utility-link" data-action="logout"><span>⌂</span><span><strong>Sign out</strong><small>Return to staff portal</small></span></button><a class="admin-utility-link" href="#/menu"><span>▣</span><span><strong>Customer app</strong><small>Preview customer menu</small></span></a><div class="admin-profile"><span class="admin-avatar">${waiterName.slice(0, 1).toUpperCase()}</span><span><strong>${waiterName}</strong><small>Waiter workspace</small></span></div></div></aside><div class="admin-main waiter-main"><header class="admin-topbar"><div><h1>Waiter portal</h1><p>Build customer orders and send payment receipts to the cashier.</p></div><span class="waiter-live-status"><i></i>Menu availability live</span></header><main class="admin-content waiter-content"><section class="waiter-greeting"><div><span class="admin-eyebrow">ORDER SERVICE</span><h2>Build a customer order</h2><p>Select the table, add the customer’s items, then record payment.</p></div><label class="waiter-table-control"><span>TABLE</span><select id="waiter-table" aria-label="Select table">${Array.from({ length: 14 }, (_, index) => `<option value="${String(index + 1).padStart(2, '0')}" ${selectedTable === String(index + 1).padStart(2, '0') ? 'selected' : ''}>Table ${String(index + 1).padStart(2, '0')}</option>`).join('')}</select></label></section><div class="waiter-builder-grid"><section class="waiter-catalog-panel"><header class="waiter-catalog-heading"><div><h3>Menu items</h3><p>Tap + to add items to the customer’s order.</p></div><span>${menuItems.length} items</span></header><div class="waiter-menu">${menuRows || '<p class="waiter-empty-menu">No menu items available.</p>'}</div></section>${renderCart(waiterCart, true)}</div></main></div>${renderWaiterPaymentReview()}</div>`;
+    return `<div class="admin-shell waiter-shell"><aside class="admin-sidebar waiter-sidebar"><a class="admin-brand" href="#/home" aria-label="Seba Cafe home"><span class="admin-brand-mark">S</span><span><strong>SEBA CAFE</strong><small>FRESH · LOCAL · EVERY DAY</small></span></a><div class="admin-role"><span>WORKSPACE</span><strong>Waiter</strong></div><nav class="admin-nav" aria-label="Waiter workspace"><a class="admin-nav-link active" href="#/waiter" aria-current="page"><span>＋</span>New order</a><a class="admin-nav-link" href="#/menu"><span>▣</span>Customer menu</a></nav><div class="admin-sidebar-footer"><button class="admin-utility-link" data-action="logout"><span>⌂</span><span><strong>Sign out</strong><small>Return to staff portal</small></span></button><a class="admin-utility-link" href="#/menu"><span>▣</span><span><strong>Customer app</strong><small>Preview customer menu</small></span></a><div class="admin-profile"><span class="admin-avatar">${waiterName.slice(0, 1).toUpperCase()}</span><span><strong>${waiterName}</strong><small>Waiter workspace</small></span></div></div></aside><div class="admin-main waiter-main"><header class="admin-topbar"><div><h1>Waiter portal</h1><p>Build customer orders and send them to the cashier.</p></div><span class="waiter-live-status"><i></i>Menu availability live</span></header><main class="admin-content waiter-content"><section class="waiter-greeting"><div><span class="admin-eyebrow">ORDER SERVICE</span><h2>Build a customer order</h2><p>Select the table, add the customer’s items, then record payment.</p></div><label class="waiter-table-control"><span>TABLE</span><select id="waiter-table" aria-label="Select table">${tableOptions(selectedTable)}</select></label></section><div class="waiter-builder-grid"><section class="waiter-catalog-panel"><header class="waiter-catalog-heading"><div><h3>Menu items</h3><p>Tap + to add items to the customer’s order.</p></div><span>${menuItems.length} items</span></header><div class="waiter-menu">${menuRows || '<p class="waiter-empty-menu">No menu items available.</p>'}</div></section>${renderCart(waiterCart, true)}</div></main></div>${renderWaiterPaymentReview()}</div>`;
 }
 
 function renderAdminLegacy() {
@@ -318,13 +316,13 @@ function renderAdmin() {
         return adminShell(`<div class="admin-greeting"><div><span class="admin-eyebrow">LIVE FLOOR</span><h2>Restaurant tables</h2></div><span class="admin-updated">${adminTables.length} tables configured</span></div><section class="admin-panel admin-table-panel"><div class="admin-panel-heading"><div><span class="admin-eyebrow">TABLES</span><h3>Current table status</h3></div></div><div class="admin-table-grid">${adminTables.map(table => `<article class="admin-table-card"><span class="admin-table-number">${esc(table.table_number)}</span><span class="admin-table-state ${table.status}"><i></i>${esc(table.status)}</span><small>${table.active_orders} active ${table.active_orders === 1 ? 'order' : 'orders'}</small></article>`).join('')}</div></section>`, activeView, title);
     }
     if (activeView === 'reports') {
-        return adminShell(`<div class="admin-greeting"><div><span class="admin-eyebrow">TODAY AT A GLANCE</span><h2>Daily report</h2></div><span class="admin-updated">Live from order history</span></div><section class="admin-stats">${adminMetric('◫', 'Today’s revenue', money(adminOverview.today_revenue), 'Paid orders')}${adminMetric('▤', 'Completed orders', adminOverview.completed_orders, 'Today')}${adminMetric('⌁', 'Average order', money(adminOverview.average_order), 'Completed orders')}${adminMetric('⌂', 'Active tables', `${adminOverview.active_tables} / ${adminOverview.total_tables}`, 'Current occupancy')}</section><section class="admin-panel admin-report-note"><span class="admin-eyebrow">PAYMENT MIX</span><h3>Revenue only includes verified payments</h3><p>Digital orders enter revenue after Chapa transaction verification. Cash orders enter revenue after cashier approval.</p></section>`, activeView, title);
+        return adminShell(`<div class="admin-greeting"><div><span class="admin-eyebrow">TODAY AT A GLANCE</span><h2>Daily report</h2></div><span class="admin-updated">Live from order history</span></div><section class="admin-stats">${adminMetric('◫', 'Today’s revenue', money(adminOverview.today_revenue), 'Completed & paid')}${adminMetric('▤', 'Completed orders', adminOverview.completed_orders, 'Finished today')}${adminMetric('⌁', 'Average order', money(adminOverview.average_order), 'Completed orders')}${adminMetric('◷', 'In service now', adminOverview.open_orders, 'Kitchen & ready')}</section><section class="admin-panel admin-report-note"><span class="admin-eyebrow">HOW THESE NUMBERS WORK</span><h3>Completed orders only count finished tickets</h3><p><strong>Completed orders</strong> increases by one each time a cashier taps <em>Complete</em> on an order, so an order is only counted after it leaves the kitchen and is served. Orders still waiting for payment, in the kitchen, or ready to serve are excluded and shown separately as <strong>In service now</strong>. Orders rejected or cancelled are never counted.</p></section><section class="admin-panel admin-report-note"><span class="admin-eyebrow">PAYMENT MIX</span><h3>Revenue only includes verified payments</h3><p>Digital orders enter revenue after Chapa transaction verification. Cash and transfer orders enter revenue after cashier approval. Transfers must be approved before the order can reach the kitchen, so an unapproved transfer never counts as revenue or as a completed order.</p></section>`, activeView, title);
     }
 
     const rows = menuItems.map(item => `<tr><td><div class="admin-item-cell"><span class="admin-item-thumb">${item.image ? `<img src="${imageUrl(item)}" alt="" loading="lazy" />` : 'E'}</span><strong>${esc(item.name)}</strong></div></td><td>${esc(item.category)}</td><td class="admin-price">${money(item.price)}</td><td><span class="admin-status-wrap"><i class="admin-status-dot ${item.status === 'in_stock' ? 'is-stock' : 'is-out'}"></i><select class="admin-status-select" data-action="set-stock" data-id="${esc(item.id)}" aria-label="Set ${esc(item.name)} availability"><option value="in_stock" ${item.status === 'in_stock' ? 'selected' : ''}>In Stock</option><option value="out_of_stock" ${item.status === 'out_of_stock' ? 'selected' : ''}>Out of Stock</option><option value="out_of_order" ${item.status === 'out_of_order' ? 'selected' : ''}>Out of Order</option></select></span></td></tr>`).join('');
     const categories = [...new Set([...menuItems.map(item => item.category), 'Food', 'Juice', 'Drinks', 'Desserts'])];
     const greetingName = esc((currentUser?.name || 'Store manager').split(' ')[0]);
-    const dashboard = `<div class="admin-greeting"><div><span class="admin-eyebrow">TODAY AT A GLANCE</span><h2>Good morning, ${greetingName}</h2></div><span class="admin-updated">Last updated just now</span></div><section class="admin-stats">${adminMetric('◫', 'Today’s revenue', money(adminOverview.today_revenue), 'Paid today')}${adminMetric('▤', 'Completed orders', adminOverview.completed_orders, 'Orders today')}${adminMetric('⌁', 'Average order', money(adminOverview.average_order), 'Completed orders')}${adminMetric('⌂', 'Active tables', `${adminOverview.active_tables} / ${adminOverview.total_tables}`, `${adminOverview.total_tables ? Math.round(adminOverview.active_tables / adminOverview.total_tables * 100) : 0}% occupied`)}</section><div class="admin-dashboard-grid"><section class="admin-panel admin-menu-panel" id="admin-menu"><div class="admin-panel-heading"><div><span class="admin-eyebrow">MENU MANAGEMENT</span><h3>Current items</h3></div><span class="admin-item-count">${menuItems.length}</span></div><div class="admin-table-scroll"><table class="admin-inventory"><thead><tr><th>Item</th><th>Category</th><th>Price</th><th>Status</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="admin-empty">No menu items yet.</td></tr>'}</tbody></table></div></section><aside class="admin-panel admin-quick-panel"><div class="admin-panel-heading"><div><span class="admin-eyebrow">QUICK ACTION</span><h3>Add a food</h3><p>Create a new item for the customer menu.</p></div></div><form class="admin-add-form" id="add-item-form"><div class="field"><label for="item-name">Item name</label><input id="item-name" name="name" placeholder="e.g. Spicy chicken wrap" required maxlength="150" /></div><div class="admin-form-row"><div class="field"><label for="item-price">Price (ETB)</label><input id="item-price" name="price" type="number" min="1" step="0.01" placeholder="320" required /></div><div class="field"><label for="item-category">Category</label><select id="item-category" name="category" required>${categories.map(category => `<option value="${esc(category)}">${esc(category)}</option>`).join('')}</select></div></div><div class="field"><label for="item-description">Description</label><input id="item-description" name="description" placeholder="Short menu description" maxlength="255" /></div><div class="field"><label for="item-image">Item photo <small>(JPG, PNG, or WebP)</small></label><input id="item-image" name="image" type="file" accept="image/jpeg,image/png,image/webp" /><small id="item-image-file-name">Choose an image for the menu item</small></div><button class="button button-primary" type="submit">Add to menu</button></form></aside></div>`;
+    const dashboard = `<div class="admin-greeting"><div><span class="admin-eyebrow">TODAY AT A GLANCE</span><h2>Good morning, ${greetingName}</h2></div><span class="admin-updated">Last updated just now</span></div><section class="admin-stats">${adminMetric('◫', 'Today’s revenue', money(adminOverview.today_revenue), 'Completed & paid')}${adminMetric('▤', 'Completed orders', adminOverview.completed_orders, 'Finished today')}${adminMetric('⌁', 'Average order', money(adminOverview.average_order), 'Completed orders')}${adminMetric('⌂', 'Active tables', `${adminOverview.active_tables} / ${adminOverview.total_tables}`, `${adminOverview.total_tables ? Math.round(adminOverview.active_tables / adminOverview.total_tables * 100) : 0}% occupied`)}</section><div class="admin-dashboard-grid"><section class="admin-panel admin-menu-panel" id="admin-menu"><div class="admin-panel-heading"><div><span class="admin-eyebrow">MENU MANAGEMENT</span><h3>Current items</h3></div><span class="admin-item-count">${menuItems.length}</span></div><div class="admin-table-scroll"><table class="admin-inventory"><thead><tr><th>Item</th><th>Category</th><th>Price</th><th>Status</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="admin-empty">No menu items yet.</td></tr>'}</tbody></table></div></section><aside class="admin-panel admin-quick-panel"><div class="admin-panel-heading"><div><span class="admin-eyebrow">QUICK ACTION</span><h3>Add a food</h3><p>Create a new item for the customer menu.</p></div></div><form class="admin-add-form" id="add-item-form"><div class="field"><label for="item-name">Item name</label><input id="item-name" name="name" placeholder="e.g. Spicy chicken wrap" required maxlength="150" /></div><div class="admin-form-row"><div class="field"><label for="item-price">Price (ETB)</label><input id="item-price" name="price" type="number" min="1" step="0.01" placeholder="320" required /></div><div class="field"><label for="item-category">Category</label><select id="item-category" name="category" required>${categories.map(category => `<option value="${esc(category)}">${esc(category)}</option>`).join('')}</select></div></div><div class="field"><label for="item-description">Description</label><input id="item-description" name="description" placeholder="Short menu description" maxlength="255" /></div><div class="field admin-upload-field"><label for="item-image">Menu photo <small>(optional · JPG, PNG or WebP · up to 5 MB)</small></label><label class="admin-upload" for="item-image" id="item-image-drop"><span class="admin-upload-thumb" id="item-image-preview" aria-hidden="true">▣</span><span class="admin-upload-copy"><strong id="item-image-file-name">Click to choose a photo</strong><small>Or drag an image here. Without a photo, the item shows a placeholder tile.</small></span><span class="admin-upload-action">Browse</span><input id="item-image" name="image" type="file" accept="image/jpeg,image/png,image/webp" /></label></div><button class="button button-primary" type="submit">Add to menu</button></form></aside></div>`;
     return adminShell(dashboard, activeView === 'menu' ? 'menu' : 'overview', title);
 }
 
@@ -333,21 +331,63 @@ function adminMetric(icon, label, value, note) {
 }
 
 function timeLabel(timestamp) { const minutes = Math.max(0, Math.floor((Date.now() - timestamp) / 60000)); return minutes < 1 ? 'Just now' : `${minutes} min ago`; }
+function paymentStateLabel(order) {
+    const status = order.paymentStatus;
+    if (status === 'paid' || status === 'verified') return 'Paid';
+    if (status === 'processing') return 'Confirming online payment';
+    if (status === 'rejected' || status === 'failed') return 'Payment failed';
+    if (order.paymentMethod === 'cash') return 'Awaiting cash';
+    if (['telebirr_transfer', 'cbe_transfer'].includes(order.paymentMethod)) return 'Awaiting verification';
+    return 'Awaiting payment';
+}
 function orderCard(order) {
     const isTransfer = ['telebirr_transfer', 'cbe_transfer'].includes(order.paymentMethod);
-    const action = order.status === 'pending_approval' && isTransfer
+    const awaitingOnline = order.paymentMethod === 'digital_aggregator' && ['processing', 'unpaid'].includes(order.paymentStatus);
+    const action = order.status === 'pending_approval' && awaitingOnline
+        ? '<span class="cashier-waiting-pill">Waiting for Chapa confirmation</span>'
+        : order.status === 'pending_approval' && isTransfer
         ? `<div class="cashier-actions"><button class="cashier-action-primary" data-action="verify-transfer" data-id="${esc(order.id)}" data-verification="approve">Approve &amp; send</button><button class="cashier-action-reject" data-action="verify-transfer" data-id="${esc(order.id)}" data-verification="reject">Reject</button></div>`
         : order.status === 'pending_approval' ? `<button class="cashier-action-primary" data-action="advance-order" data-id="${esc(order.id)}">Approve &amp; pay</button>`
             : order.status === 'in_kitchen' ? `<button class="cashier-action-secondary" data-action="advance-order" data-id="${esc(order.id)}">Mark ready</button>`
                 : `<button class="cashier-action-complete" data-action="advance-order" data-id="${esc(order.id)}">Complete ✓</button>`;
-    const paymentLabel = order.paymentMethod === 'telebirr_transfer' ? 'Telebirr transfer' : order.paymentMethod === 'cbe_transfer' ? 'Bank transfer' : order.payment === 'cash' ? 'Cash' : 'Digital';
+    const paymentLabel = order.paymentMethod === 'telebirr_transfer' ? 'Telebirr transfer' : order.paymentMethod === 'cbe_transfer' ? 'Bank transfer' : order.paymentMethod === 'cash' ? 'Cash' : 'Online';
+    const paidClass = ['paid', 'verified'].includes(order.paymentStatus) ? 'is-paid' : order.paymentStatus === 'processing' ? 'is-pending' : 'is-unpaid';
     const lines = order.lines.map(line => `<span>${line.quantity} × ${esc(line.name)}</span>`).join('');
-    return `<article class="cashier-order-card"><div class="cashier-order-top"><div><small>ORDER</small><strong>#${esc(order.id)}</strong></div><span class="cashier-table-tag">T${esc(order.table)}</span></div><div class="cashier-order-time"><span>◷ ${timeLabel(order.createdAt)}</span><span>${paymentLabel}</span></div><div class="cashier-order-lines">${lines || '<span>No items listed</span>'}</div><div class="cashier-order-bottom"><strong>${money(order.total)}</strong><div class="cashier-actions-wrap">${action}</div></div></article>`;
+    return `<article class="cashier-order-card"><div class="cashier-order-top"><div><small>ORDER</small><strong>#${esc(order.id)}</strong></div><span class="cashier-table-tag" title="Table status: ${esc(order.tableStatus || 'available')}">T${esc(order.table)}<i class="cashier-table-state ${esc(order.tableStatus || 'available')}"></i></span></div><div class="cashier-order-time"><span>◷ ${timeLabel(order.createdAt)}</span><span>${paymentLabel}</span><span class="cashier-pay-state ${paidClass}">${esc(paymentStateLabel(order))}</span></div><div class="cashier-order-lines">${lines || '<span>No items listed</span>'}</div><div class="cashier-order-bottom"><strong>${money(order.total)}</strong><div class="cashier-actions-wrap">${action}</div></div></article>`;
 }
-function renderCashier() {
+function cashierSidebar(activeView) {
     const isAdmin = currentUser?.role === 'admin';
-    const navItems = [['cashier', '▦', 'Orders', orders.filter(order => order.status === 'pending_approval').length]];
+    const navItems = [
+        ['cashier', '▦', 'Orders', orders.filter(order => order.status === 'pending_approval').length],
+        ['cashier/report', '▥', 'Completed report', 0]
+    ];
     if (isAdmin) navItems.push(['admin?view=menu', '☷', 'Menu management'], ['admin?view=tables', '⌂', 'Tables'], ['admin?view=reports', '▥', 'Reports']);
+    const staffName = esc(currentUser?.name || 'Cashier');
+    return `<aside class="cashier-sidebar"><a class="cashier-brand" href="#/home"><span class="brand-mark">S</span><span><strong>SEBA CAFE</strong><small>FRESH · LOCAL · EVERY DAY</small></span></a><nav class="cashier-nav" aria-label="Cashier navigation">${navItems.map(([path, icon, label, badge]) => `<a class="cashier-nav-link ${path === activeView ? 'active' : ''}" href="#/${path}"${path === activeView ? ' aria-current="page"' : ''}><span class="cashier-nav-icon">${icon}</span><span>${label}</span>${badge ? `<small>${badge}</small>` : ''}</a>`).join('')}</nav><div class="cashier-sidebar-bottom"><button class="cashier-utility-link" data-action="logout"><span>⌂</span><span><strong>Sign out</strong><small>Return to staff portal</small></span></button>${!isAdmin ? '<a class="cashier-utility-link" href="#/menu"><span>▣</span><span><strong>Customer menu</strong><small>Open the ordering page</small></span></a>' : ''}<div class="cashier-profile"><span class="cashier-avatar">${staffName.slice(0, 1).toUpperCase()}</span><span><strong>${staffName}</strong><small>${isAdmin ? 'Administrator' : 'Cashier workspace'}</small></span></div></div></aside>`;
+}
+
+function formatReportDate(value) {
+    const [year, month, day] = String(value || '').split('-').map(Number);
+    if (!year || !month || !day) return value || '';
+    return new Date(year, month - 1, day).toLocaleDateString('en-US', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+}
+function renderCashierReport() {
+    const report = cashierReport;
+    const methodLabel = method => method === 'telebirr_transfer' ? 'Telebirr transfer' : method === 'cbe_transfer' ? 'Bank transfer' : method === 'cash' ? 'Cash' : 'Pay online';
+    const methodRows = ['cash', 'telebirr_transfer', 'cbe_transfer', 'digital_aggregator'].map(method => {
+        const cents = report.by_method?.[method] || 0;
+        return `<div class="cashier-report-line"><span>${methodLabel(method)}</span><strong>${money(cents / 100)}</strong></div>`;
+    }).join('');
+    const rows = report.orders.map(order => `<tr><td><strong>#${esc(order.id)}</strong><small>${esc(order.source)}</small></td><td>T${esc(order.table_number)}</td><td>${methodLabel(order.payment_method)}</td><td class="cashier-report-amount">${money(order.total_amount)}</td><td>${new Date(order.created_at).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}</td></tr>`).join('');
+    const isEmpty = !report.orders.length;
+    // When today has no completed orders, point staff to the last day that does.
+    const jumpDate = report.latest_completed_date && report.latest_completed_date !== report.date ? report.latest_completed_date : null;
+    const emptyState = `<p class="cashier-empty">No orders were completed on ${formatReportDate(report.date)}.</p>${jumpDate ? `<div class="cashier-report-suggest"><span>Last completed order was on <strong>${formatReportDate(jumpDate)}</strong>.</span><a class="button button-outline" href="#/cashier/report?date=${encodeURIComponent(jumpDate)}">View ${formatReportDate(jumpDate)}</a></div>` : ''}`;
+    return `<div class="cashier-dashboard">${cashierSidebar('cashier/report')}<main class="cashier-main"><header class="cashier-topbar"><div><h1>Completed orders report</h1><p>${formatReportDate(report.date)}</p></div><div class="cashier-top-actions"><label class="cashier-report-date"><span>Report date</span><input type="date" id="cashier-report-date" value="${esc(report.date)}" max="${esc(report.today || report.date)}" /></label><button class="cashier-notification" data-action="notifications" aria-label="Notifications" title="Notifications">♧<i></i></button></div></header><div class="cashier-content"><div class="cashier-page-heading"><div><span>DAILY TOTALS</span><h2>Money collected</h2></div><div class="cashier-summary"><span>Completed orders <strong>${report.completed_count}</strong></span><span>Total collected <strong>${money(report.total_amount)}</strong></span></div></div><section class="cashier-report-totals"><article class="cashier-report-card primary"><span>Total money collected</span><strong>${money(report.total_amount)}</strong><small>${report.paid_count} paid ${report.paid_count === 1 ? 'order' : 'orders'} completed this day</small></article><article class="cashier-report-card"><span>Completed orders</span><strong>${report.completed_count}</strong><small>Finished tickets</small></article><article class="cashier-report-card"><span>Average order</span><strong>${money(report.average_amount)}</strong><small>Per paid order</small></article><section class="cashier-report-card cashier-report-mix"><span>Breakdown by payment method</span>${methodRows}</section></section><section class="cashier-report-panel"><header><div><h3>Completed order list</h3><p>Every order a cashier finished on the day.</p></div><strong>${report.completed_count}</strong></header>${isEmpty ? emptyState : `<div class="cashier-report-table-wrap"><table class="cashier-report-table"><thead><tr><th>Order</th><th>Table</th><th>Payment</th><th>Amount</th><th>Completed</th></tr></thead><tbody>${rows}</tbody></table></div>`}</section></div></main></div>`;
+
+}
+
+function renderCashier() {
     const openOrders = orders.filter(order => ['pending_approval', 'in_kitchen', 'ready'].includes(order.status));
     const averageMinutes = openOrders.length ? Math.round(openOrders.reduce((sum, order) => sum + Math.max(0, (Date.now() - order.createdAt) / 60000), 0) / openOrders.length) : 0;
     const columns = [
@@ -360,8 +400,7 @@ function renderCashier() {
         return `<section class="cashier-column"><header class="cashier-column-heading"><span class="cashier-column-dot ${dotClass}"></span><div><h3>${title}</h3><small>${subtitle}</small></div><span class="cashier-column-count">${list.length}</span></header><div class="cashier-column-stack">${list.length ? list.map(orderCard).join('') : '<p class="cashier-empty">No orders here</p>'}</div></section>`;
     }).join('');
     const dateLabel = new Date().toLocaleDateString('en-US', { weekday: 'long', day: 'numeric', month: 'long' });
-    const staffName = esc(currentUser?.name || 'Cashier');
-    return `<div class="cashier-dashboard"><aside class="cashier-sidebar"><a class="cashier-brand" href="#/home"><span class="brand-mark">S</span><span><strong>SEBA CAFE</strong><small>FRESH · LOCAL · EVERY DAY</small></span></a><nav class="cashier-nav" aria-label="Cashier navigation">${navItems.map(([path, icon, label, badge]) => `<a class="cashier-nav-link ${path === 'cashier' ? 'active' : ''}" href="#/${path}"><span class="cashier-nav-icon">${icon}</span><span>${label}</span>${badge ? `<small>${badge}</small>` : ''}</a>`).join('')}</nav><div class="cashier-sidebar-bottom"><button class="cashier-utility-link" data-action="logout"><span>⌂</span><span><strong>Sign out</strong><small>Return to staff portal</small></span></button>${!isAdmin ? '<a class="cashier-utility-link" href="#/menu"><span>▣</span><span><strong>Customer menu</strong><small>Open the ordering page</small></span></a>' : ''}<div class="cashier-profile"><span class="cashier-avatar">${staffName.slice(0, 1).toUpperCase()}</span><span><strong>${staffName}</strong><small>${isAdmin ? 'Administrator' : 'Cashier workspace'}</small></span></div></div></aside><main class="cashier-main"><header class="cashier-topbar"><div><h1>Live orders</h1><p>${dateLabel}</p></div><div class="cashier-top-actions"><span class="cashier-live"><i></i>Live · Connected</span><button class="cashier-notification" data-action="notifications" aria-label="Notifications" title="Notifications">♧<i></i></button></div></header><div class="cashier-content"><div class="cashier-page-heading"><div><span>ORDER MANAGEMENT</span><h2>Kitchen overview</h2></div><div class="cashier-summary"><span>Open orders <strong>${openOrders.length}</strong></span><span>Avg. time <strong>${averageMinutes}m</strong></span></div></div><div class="cashier-columns">${orderColumns}</div></div></div>`;
+    return `<div class="cashier-dashboard">${cashierSidebar('cashier')}<main class="cashier-main"><header class="cashier-topbar"><div><h1>Live orders</h1><p>${dateLabel}</p></div><div class="cashier-top-actions"><span class="cashier-live"><i></i>Live · Connected</span><button class="cashier-notification" data-action="notifications" aria-label="Notifications" title="Notifications">♧<i></i></button></div></header><div class="cashier-content"><div class="cashier-page-heading"><div><span>ORDER MANAGEMENT</span><h2>Kitchen overview</h2></div><div class="cashier-summary"><span>Open orders <strong>${openOrders.length}</strong></span><span>Avg. time <strong>${averageMinutes}m</strong></span></div></div><div class="cashier-columns">${orderColumns}</div></div></div>`;
 }
 
 function renderUnavailable(message) {
@@ -378,11 +417,12 @@ async function render() {
             app.innerHTML = renderLoginScreen(routeQuery().get('role') || 'cashier');
             return;
         }
-        if (['admin', 'cashier', 'waiter'].includes(current)) {
+        if (['admin', 'cashier', 'cashier/report', 'waiter'].includes(current)) {
             const { user } = await api('/api/auth/session');
             currentUser = user;
-            if (user.role !== current && !(current === 'cashier' && user.role === 'admin')) {
-                app.innerHTML = renderLoginScreen(current);
+            const staffView = current.split('/')[0];
+            if (user.role !== staffView && !(staffView === 'cashier' && user.role === 'admin')) {
+                app.innerHTML = renderLoginScreen(staffView);
                 return;
             }
         }
@@ -404,12 +444,21 @@ async function render() {
             const data = await api('/api/cashier/orders');
             orders = data.orders.map(normalizeOrder);
         }
-        if (['confirmation', 'payment-return', 'pay-bill'].includes(current)) {
+        if (current === 'cashier/report') {
+            const requestedDate = routeQuery().get('date') || '';
+            // Always ask the server which day it reports on, so the picker and the totals agree
+            // even when the browser and the server sit in different time zones.
+            cashierReport = await api(`/api/cashier/report${requestedDate ? `?date=${encodeURIComponent(requestedDate)}` : ''}`);
+            if (version !== renderVersion) return;
+            app.innerHTML = renderCashierReport();
+            return;
+        }
+        if (['confirmation', 'payment-return'].includes(current)) {
             const token = routeQuery().get('token');
             if (!token) throw new Error('This order link is incomplete.');
             const order = await api(`/api/orders/public/${encodeURIComponent(token)}`);
             if (version !== renderVersion) return;
-            app.innerHTML = current === 'confirmation' ? renderConfirmation(order) : current === 'pay-bill' ? renderPayBill(order) : renderPaymentReturn(order);
+            app.innerHTML = current === 'confirmation' ? renderConfirmation(order) : renderPaymentReturn(order);
             return;
         }
         if (version !== renderVersion) return;
@@ -430,13 +479,21 @@ async function render() {
     } catch (error) {
         if (version !== renderVersion) return;
         if (error.status === 404) {
+            if (current === 'cashier/report') {
+                // Keep staff on their own screen instead of bouncing to the shop front.
+                app.innerHTML = `<div class="cashier-dashboard">${cashierSidebar('cashier/report')}<main class="cashier-main"><div class="cashier-content"><section class="cashier-report-panel"><header><div><h3>Report unavailable</h3><p>${esc(error.message)}</p></div></header><a class="cashier-utility-link" href="#/cashier"><span>←</span><span><strong>Back to live orders</strong><small>Return to the kitchen overview</small></span></a></section></div></main></div>`;
+                return;
+            }
             location.hash = '/home';
             return;
         }
-        if (error.status === 401 && ['admin', 'cashier', 'waiter'].includes(current)) {
-            location.hash = `/login?role=${current}&next=${current}`;
-            app.innerHTML = renderLoginScreen(current);
-            return;
+        if (error.status === 401) {
+            const staffView = current.split('/')[0];
+            if (['admin', 'cashier', 'waiter'].includes(staffView)) {
+                location.hash = `/login?role=${staffView}&next=${staffView}`;
+                app.innerHTML = renderLoginScreen(staffView);
+                return;
+            }
         }
         app.innerHTML = renderUnavailable(error.message);
     }
@@ -450,18 +507,9 @@ function changeQuantity(target, id, delta) {
     if (next) target[id] = next; else delete target[id];
     render();
 }
-async function submitOrder(paymentMethod, orderType, targetCart, imageFile = null) {
+async function submitOrder(paymentMethod, orderType, targetCart) {
     const items = Object.entries(targetCart).filter(([, quantity]) => quantity > 0).map(([menuItemId, quantity]) => ({ menu_item_id: menuItemId, quantity }));
     if (!items.length) throw new Error('Add at least one item before placing the order.');
-    if (imageFile) {
-        const body = new FormData();
-        body.set('table_number', selectedTable);
-        body.set('order_type', orderType);
-        body.set('payment_method', paymentMethod);
-        body.set('items', JSON.stringify(items));
-        body.set('receipt_image', imageFile);
-        return api('/api/orders', { method: 'POST', body });
-    }
     return api('/api/orders', {
         method: 'POST',
         body: JSON.stringify({ table_number: selectedTable, order_type: orderType, payment_method: paymentMethod, items })
@@ -554,7 +602,6 @@ document.addEventListener('click', event => {
 
 document.addEventListener('input', event => {
     if (event.target.id !== 'menu-search') return;
-    menuSearch = event.target.value;
     const visible = filteredMenuItems();
     const grid = document.getElementById('menu-grid');
     const count = document.getElementById('menu-count');
@@ -562,8 +609,36 @@ document.addEventListener('input', event => {
     if (count) count.textContent = `${visible.length} ${visible.length === 1 ? 'item' : 'items'}`;
 });
 
+function showItemImagePreview(input) {
+    const file = input.files && input.files[0];
+    const box = document.getElementById('item-image-drop');
+    const label = document.getElementById('item-image-file-name');
+    const thumb = document.getElementById('item-image-preview');
+    if (!box || !label || !thumb) return;
+    thumb.style.backgroundImage = '';
+    thumb.textContent = '▣';
+    box.classList.remove('has-file', 'has-error');
+    if (!file) {
+        label.textContent = 'Click to choose a photo';
+        return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+        input.value = '';
+        box.classList.add('has-error');
+        label.textContent = 'That photo is larger than 5 MB';
+        showToast('Choose a JPG, PNG, or WebP image up to 5 MB.', true);
+        return;
+    }
+    box.classList.add('has-file');
+    label.textContent = `${file.name} · ${(file.size / 1024 / 1024).toFixed(1)} MB`;
+    thumb.style.backgroundImage = `url("${URL.createObjectURL(file)}")`;
+    thumb.textContent = '';
+}
+
 document.addEventListener('change', event => {
     const target = event.target;
+    if (target.id === 'item-image') { showItemImagePreview(target); return; }
+    if (target.id === 'cashier-report-date') { location.hash = `/cashier/report?date=${encodeURIComponent(target.value)}`; return; }
     if (target.id === 'qr-table' || target.id === 'waiter-table') {
         selectedTable = target.value;
         if (target.id === 'waiter-table') render();
@@ -587,7 +662,6 @@ document.addEventListener('submit', event => {
         button.disabled = true;
         submitOrder(waiterPaymentMethod, 'waiter_assisted', waiterCart, null).then(order => {
             waiterCart = {};
-            waiterReceiptFile = null;
             document.getElementById('waiter-checkout-dialog')?.close();
             showToast(`Order #${order.order_id} sent to cashier for review.`);
             location.hash = `/confirmation?token=${encodeURIComponent(order.public_token)}&source=waiter`;
@@ -617,17 +691,6 @@ document.addEventListener('submit', event => {
             showToast(error.message, true);
             button.disabled = false;
         });
-        return;
-    }
-    if (event.target.id === 'paybill-form') {
-        event.preventDefault();
-        const form = event.target;
-        const data = new FormData(form);
-        const button = form.querySelector('button[type="submit"]');
-        button.disabled = true;
-        api('/api/payments/initialize', { method: 'POST', body: paymentSubmitBody(data, { order_id: form.dataset.order, public_token: form.dataset.token }) })
-            .then(payment => continuePayment(payment, form.dataset.token))
-            .catch(error => { showToast(error.message, true); button.disabled = false; });
         return;
     }
     if (event.target.id === 'staff-login-form') {
