@@ -3,7 +3,7 @@ const esc = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', 
 let menuItems = [];
 let orders = [];
 let adminOverview = { today_revenue: 0, completed_orders: 0, open_orders: 0, average_order: 0, active_tables: 0, total_tables: 0 };
-let cashierReport = { date: '', completed_count: 0, paid_count: 0, total_amount: 0, average_amount: 0, by_method: {}, orders: [] };
+let cashierReport = { mode: 'range', range: 'week', date: '', today: '', month: null, completed_count: 0, paid_count: 0, total_amount: 0, average_amount: 0, by_method: {}, group_count: 0, groups: [], available_days: [], orders: [] };
 let adminTables = [];
 let currentUser = null;
 let cart = {};
@@ -366,25 +366,89 @@ function cashierSidebar(activeView) {
     return `<aside class="cashier-sidebar"><a class="cashier-brand" href="#/home"><span class="brand-mark">S</span><span><strong>SEBA CAFE</strong><small>FRESH · LOCAL · EVERY DAY</small></span></a><nav class="cashier-nav" aria-label="Cashier navigation">${navItems.map(([path, icon, label, badge]) => `<a class="cashier-nav-link ${path === activeView ? 'active' : ''}" href="#/${path}"${path === activeView ? ' aria-current="page"' : ''}><span class="cashier-nav-icon">${icon}</span><span>${label}</span>${badge ? `<small>${badge}</small>` : ''}</a>`).join('')}</nav><div class="cashier-sidebar-bottom"><button class="cashier-utility-link" data-action="logout"><span>⌂</span><span><strong>Sign out</strong><small>Return to staff portal</small></span></button>${!isAdmin ? '<a class="cashier-utility-link" href="#/menu"><span>▣</span><span><strong>Customer menu</strong><small>Open the ordering page</small></span></a>' : ''}<div class="cashier-profile"><span class="cashier-avatar">${staffName.slice(0, 1).toUpperCase()}</span><span><strong>${staffName}</strong><small>${isAdmin ? 'Administrator' : 'Cashier workspace'}</small></span></div></div></aside>`;
 }
 
-function formatReportDate(value) {
+function formatReportDate(value, options = {}) {
+    const [year, month, day] = String(value || '').split('-').map(Number);
+    if (!year || (!month && !day)) return value || '';
+    if (!month) return new Date(year, 0, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+    if (!day) return new Date(year, month - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+    const date = new Date(year, month - 1, day);
+    if (options.short) return date.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric', month: 'short' });
+    return date.toLocaleDateString('en-US', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+}
+function dayLabel(value) {
+    const today = cashierReport.today;
     const [year, month, day] = String(value || '').split('-').map(Number);
     if (!year || !month || !day) return value || '';
-    return new Date(year, month - 1, day).toLocaleDateString('en-US', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+    const weekday = new Date(year, month - 1, day).toLocaleDateString('en-US', { weekday: 'long' });
+    const pretty = new Date(year, month - 1, day).toLocaleDateString('en-US', { day: 'numeric', month: 'long' });
+    return value === today ? `Today · ${weekday}` : `${weekday} · ${pretty}`;
 }
+function reportMethodLabel(method) {
+    return method === 'telebirr_transfer' ? 'Telebirr transfer' : method === 'cbe_transfer' ? 'Bank transfer' : method === 'cash' ? 'Cash' : 'Pay online';
+}
+function reportOrderTable(orders) {
+    const rows = orders.map(order => `<tr><td><strong>#${esc(order.id)}</strong><small>${esc(order.source)}</small></td><td>T${esc(order.table_number)}</td><td>${reportMethodLabel(order.payment_method)}</td><td class="cashier-report-amount">${money(order.total_amount)}</td><td>${new Date(order.created_at).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}</td></tr>`).join('');
+    return `<div class="cashier-report-table-wrap"><table class="cashier-report-table"><thead><tr><th>Order</th><th>Table</th><th>Payment</th><th>Amount</th><th>Time</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
 function renderCashierReport() {
     const report = cashierReport;
-    const methodLabel = method => method === 'telebirr_transfer' ? 'Telebirr transfer' : method === 'cbe_transfer' ? 'Bank transfer' : method === 'cash' ? 'Cash' : 'Pay online';
+    const isDay = report.mode === 'day';
     const methodRows = ['cash', 'telebirr_transfer', 'cbe_transfer', 'digital_aggregator'].map(method => {
         const cents = report.by_method?.[method] || 0;
-        return `<div class="cashier-report-line"><span>${methodLabel(method)}</span><strong>${money(cents / 100)}</strong></div>`;
+        return `<div class="cashier-report-line"><span>${reportMethodLabel(method)}</span><strong>${money(cents / 100)}</strong></div>`;
     }).join('');
-    const rows = report.orders.map(order => `<tr><td><strong>#${esc(order.id)}</strong><small>${esc(order.source)}</small></td><td>T${esc(order.table_number)}</td><td>${methodLabel(order.payment_method)}</td><td class="cashier-report-amount">${money(order.total_amount)}</td><td>${new Date(order.created_at).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}</td></tr>`).join('');
-    const isEmpty = !report.orders.length;
-    // When today has no completed orders, point staff to the last day that does.
-    const jumpDate = report.latest_completed_date && report.latest_completed_date !== report.date ? report.latest_completed_date : null;
-    const emptyState = `<p class="cashier-empty">No orders were completed on ${formatReportDate(report.date)}.</p>${jumpDate ? `<div class="cashier-report-suggest"><span>Last completed order was on <strong>${formatReportDate(jumpDate)}</strong>.</span><a class="button button-outline" href="#/cashier/report?date=${encodeURIComponent(jumpDate)}">View ${formatReportDate(jumpDate)}</a></div>` : ''}`;
-    return `<div class="cashier-dashboard">${cashierSidebar('cashier/report')}<main class="cashier-main"><header class="cashier-topbar"><div><h1>Completed orders report</h1><p>${formatReportDate(report.date)}</p></div><div class="cashier-top-actions"><label class="cashier-report-date"><span>Report date</span><input type="date" id="cashier-report-date" value="${esc(report.date)}" max="${esc(report.today || report.date)}" /></label><button class="cashier-notification" data-action="notifications" aria-label="Notifications" title="Notifications">♧<i></i></button></div></header><div class="cashier-content"><div class="cashier-page-heading"><div><span>DAILY TOTALS</span><h2>Money collected</h2></div><div class="cashier-summary"><span>Completed orders <strong>${report.completed_count}</strong></span><span>Total collected <strong>${money(report.total_amount)}</strong></span></div></div><section class="cashier-report-totals"><article class="cashier-report-card primary"><span>Total money collected</span><strong>${money(report.total_amount)}</strong><small>${report.paid_count} paid ${report.paid_count === 1 ? 'order' : 'orders'} completed this day</small></article><article class="cashier-report-card"><span>Completed orders</span><strong>${report.completed_count}</strong><small>Finished tickets</small></article><article class="cashier-report-card"><span>Average order</span><strong>${money(report.average_amount)}</strong><small>Per paid order</small></article><section class="cashier-report-card cashier-report-mix"><span>Breakdown by payment method</span>${methodRows}</section></section><section class="cashier-report-panel"><header><div><h3>Completed order list</h3><p>Every order a cashier finished on the day.</p></div><strong>${report.completed_count}</strong></header>${isEmpty ? emptyState : `<div class="cashier-report-table-wrap"><table class="cashier-report-table"><thead><tr><th>Order</th><th>Table</th><th>Payment</th><th>Amount</th><th>Completed</th></tr></thead><tbody>${rows}</tbody></table></div>`}</section></div></main></div>`;
 
+    // Date pickers: a single day, or a whole month.
+    const dateField = isDay
+        ? `<input type="date" id="cashier-report-date" aria-label="Report date" value="${esc(report.date)}" max="${esc(report.today || report.date)}" />`
+        : `<input type="month" id="cashier-report-month" aria-label="Report month" value="${esc(report.month || report.this_month || '')}" max="${esc(report.this_month || '')}" />`;
+    const rangeButtons = [['today', 'Today'], ['week', 'Last 7 days'], ['month', 'This month'], ['all', 'All time']]
+        .map(([value, label]) => `<a class="cashier-range-chip ${report.mode === 'range' && report.range === value ? 'active' : ''}" href="#/cashier/report?range=${value}">${label}</a>`)
+        .join('');
+    const subtitle = isDay
+        ? formatReportDate(report.date)
+        : report.mode === 'month'
+            ? formatReportDate(report.month)
+            : report.range === 'today' ? 'Today' : report.range === 'week' ? 'Last 7 days' : report.range === 'month' ? 'This month' : 'All completed orders';
+
+    // Recent days, so any date can be opened in one click.
+    const dayChips = (report.available_days || []).slice(0, 10)
+        .map(day => `<a class="cashier-day-chip ${isDay && report.date === day.date ? 'active' : ''}" href="#/cashier/report?date=${encodeURIComponent(day.date)}"><strong>${formatReportDate(day.date, { short: true })}</strong><small>${day.orders} ${day.orders === 1 ? 'order' : 'orders'}</small></a>`)
+        .join('');
+
+    // Grouped by calendar day, newest first, each group closed with its own total.
+    const groups = isDay
+        ? [{ date: report.date, completed_count: report.completed_count, total_amount: report.total_amount, orders: report.orders }]
+        : (report.groups || []);
+    const list = groups.length
+        ? groups.map(group => `<section class="cashier-day-group">
+            <header class="cashier-day-heading">
+                <div><strong>${dayLabel(group.date)}</strong><small>${group.completed_count} ${group.completed_count === 1 ? 'order' : 'orders'}</small></div>
+                <span>${money(group.total_amount)}</span>
+            </header>
+            ${reportOrderTable(group.orders)}
+        </section>`).join('')
+        : `<p class="cashier-empty">No orders were completed ${isDay ? `on ${formatReportDate(report.date)}` : 'in this period'}.</p>`;
+
+    const emptyHint = !groups.length && !isDay && report.latest_completed_date
+        ? `<div class="cashier-report-suggest"><span>Last completed order was on <strong>${formatReportDate(report.latest_completed_date)}</strong>.</span><a class="button button-outline" href="#/cashier/report?date=${encodeURIComponent(report.latest_completed_date)}">View that day</a></div>`
+        : '';
+
+    return `<div class="cashier-dashboard">${cashierSidebar('cashier/report')}<main class="cashier-main">
+    <header class="cashier-topbar"><div><h1>Completed orders</h1><p>${isDay ? subtitle : `${subtitle} · grouped by date`}</p></div><div class="cashier-top-actions"><label class="cashier-report-date">${dateField}</label><button class="cashier-notification" data-action="notifications" aria-label="Notifications" title="Notifications">♧<i></i></button></div></header>
+    <div class="cashier-content">
+        <div class="cashier-page-heading"><div><span>REPORT</span><h2>Money collected</h2></div><div class="cashier-summary"><span>Completed orders <strong>${report.completed_count}</strong></span><span>Total collected <strong>${money(report.total_amount)}</strong></span></div></div>
+        <nav class="cashier-range-bar" aria-label="Report range">${rangeButtons}</nav>
+        <section class="cashier-report-totals">
+            <article class="cashier-report-card primary"><span>Total money collected</span><strong>${money(report.total_amount)}</strong><small>${report.paid_count} paid ${report.paid_count === 1 ? 'order' : 'orders'}</small></article>
+            <article class="cashier-report-card"><span>Completed orders</span><strong>${report.completed_count}</strong><small>${isDay ? 'Finished tickets' : `Across ${report.group_count || 0} ${report.group_count === 1 ? 'day' : 'days'}`}</small></article>
+            <article class="cashier-report-card"><span>Average order</span><strong>${money(report.average_amount)}</strong><small>Per paid order</small></article>
+            <section class="cashier-report-card cashier-report-mix"><span>Breakdown by payment method</span>${methodRows}</section>
+        </section>
+        ${dayChips ? `<section class="cashier-day-strip"><span class="cashier-day-strip-label">Jump to a day</span>${dayChips}</section>` : ''}
+        <section class="cashier-report-panel"><header><div><h3>Completed order list</h3><p>Grouped by the day the order was placed, newest first.</p></div><strong>${report.completed_count}</strong></header>${list}${emptyHint}</section>
+    </div></main></div>`;
 }
 
 function renderCashier() {
@@ -445,10 +509,14 @@ async function render() {
             orders = data.orders.map(normalizeOrder);
         }
         if (current === 'cashier/report') {
-            const requestedDate = routeQuery().get('date') || '';
+            const query = routeQuery();
+            const params = new URLSearchParams();
+            if (query.get('date')) params.set('date', query.get('date'));
+            else if (query.get('month')) params.set('month', query.get('month'));
+            else params.set('range', query.get('range') || 'week');
             // Always ask the server which day it reports on, so the picker and the totals agree
             // even when the browser and the server sit in different time zones.
-            cashierReport = await api(`/api/cashier/report${requestedDate ? `?date=${encodeURIComponent(requestedDate)}` : ''}`);
+            cashierReport = await api(`/api/cashier/report?${params.toString()}`);
             if (version !== renderVersion) return;
             app.innerHTML = renderCashierReport();
             return;
@@ -639,6 +707,7 @@ document.addEventListener('change', event => {
     const target = event.target;
     if (target.id === 'item-image') { showItemImagePreview(target); return; }
     if (target.id === 'cashier-report-date') { location.hash = `/cashier/report?date=${encodeURIComponent(target.value)}`; return; }
+    if (target.id === 'cashier-report-month') { location.hash = `/cashier/report?month=${encodeURIComponent(target.value)}`; return; }
     if (target.id === 'qr-table' || target.id === 'waiter-table') {
         selectedTable = target.value;
         if (target.id === 'waiter-table') render();

@@ -655,48 +655,117 @@ app.get('/api/cashier/orders', requireRole('cashier', 'admin'), async (req, res,
     } catch (error) { next(error); }
 });
 
+// Summarises a set of completed orders into the numbers the report shows.
+function summariseCompleted(orders) {
+    const paid = orders.filter(order => ['paid', 'verified'].includes(order.payment_status));
+    const cents = paid.reduce((sum, order) => sum + moneyInCents(order.total_amount), 0);
+    const byMethod = {};
+    for (const order of paid) byMethod[order.payment_method] = (byMethod[order.payment_method] || 0) + moneyInCents(order.total_amount);
+    return {
+        completed_count: orders.length,
+        paid_count: paid.length,
+        total_amount: Number((cents / 100).toFixed(2)),
+        average_amount: paid.length ? Number((cents / 100 / paid.length).toFixed(2)) : 0,
+        by_method: byMethod
+    };
+}
+
+function completedOrderRow(row) {
+    return {
+        id: row.id,
+        table_number: row.table_number,
+        source: row.order_type === 'waiter_assisted' ? 'Waiter' : 'QR menu',
+        payment_method: row.payment_method,
+        payment_status: row.payment_status,
+        total_amount: Number(row.total_amount),
+        created_at: row.created_at
+    };
+}
+
 app.get('/api/cashier/report', requireRole('cashier', 'admin'), async (req, res, next) => {
     try {
         const requested = String(req.query.date || '').trim();
+        const monthRequested = String(req.query.month || '').trim();
+        const rangeRequested = String(req.query.range || '').trim();
         if (requested && !/^\d{4}-\d{2}-\d{2}$/.test(requested)) return sendError(res, 400, 'Choose a valid report date.');
+        if (monthRequested && !/^\d{4}-\d{2}$/.test(monthRequested)) return sendError(res, 400, 'Choose a valid report month.');
+        if (!['today', 'week', 'month', 'all'].includes(rangeRequested || 'day')) return sendError(res, 400, 'Choose a valid report range.');
         // Use the database clock so "today" matches the rows, not the time zone of either process.
         // CAST keeps these as plain YYYY-MM-DD strings instead of JS Date objects.
-        const [[clock]] = await pool.query('SELECT CAST(CURDATE() AS CHAR) AS today');
+        const [[clock]] = await pool.query('SELECT CAST(CURDATE() AS CHAR) AS today, CAST(DATE_FORMAT(CURDATE(), \'%Y-%m\') AS CHAR) AS this_month');
         const today = clock.today;
         const [latestRows] = await pool.query(
             "SELECT CAST(DATE_FORMAT(MAX(created_at), '%Y-%m-%d') AS CHAR) AS latest FROM orders WHERE status = 'completed'"
         );
+        const mode = rangeRequested ? 'range' : monthRequested ? 'month' : 'day';
         const latestCompleted = latestRows[0].latest;
-        const date = requested || today;
-        // Only orders a cashier actually finished count; a completed order is always paid or verified by then.
-        const [rows] = await pool.execute(
-            `SELECT id, table_number, order_type, payment_method, payment_status, total_amount, created_at
-             FROM orders WHERE status = 'completed' AND DATE(created_at) = ? ORDER BY created_at DESC`,
-            [date]
+
+        if (mode === 'day') {
+            const date = requested || today;
+            // Only orders a cashier actually finished count; a completed order is always paid or verified by then.
+            const [rows] = await pool.execute(
+                `SELECT id, table_number, order_type, payment_method, payment_status, total_amount, created_at
+                 FROM orders WHERE status = 'completed' AND DATE(created_at) = ? ORDER BY created_at DESC`,
+                [date]
+            );
+            const completed = rows.map(completedOrderRow);
+            return res.json({
+                mode, date, today, latest_completed_date: latestCompleted || null,
+                ...summariseCompleted(completed), orders: completed
+            });
+        }
+
+        // Grouped by calendar day, newest first. Ranges are resolved by the database clock.
+        let fromDate = null;
+        if (mode === 'range') {
+            if (rangeRequested === 'today') fromDate = today;
+            else if (rangeRequested === 'week') fromDate = null; // handled below with an interval
+            else if (rangeRequested === 'month') fromDate = `${today.slice(0, 7)}-01`;
+        }
+        const where = ["status = 'completed'"];
+        const params = [];
+        if (mode === 'range') {
+            if (rangeRequested === 'today') { where.push('DATE(created_at) = ?'); params.push(today); }
+            else if (rangeRequested === 'week') { where.push('created_at >= (CURDATE() - INTERVAL 6 DAY)'); }
+            else if (rangeRequested === 'month') { where.push('DATE_FORMAT(created_at, \'%Y-%m\') = ?'); params.push(today.slice(0, 7)); }
+        } else if (mode === 'month') {
+            where.push("DATE_FORMAT(created_at, '%Y-%m') = ?");
+            params.push(monthRequested || clock.this_month);
+        }
+        const [rows] = await pool.query(
+            `SELECT id, table_number, order_type, payment_method, payment_status, total_amount, created_at,
+                    CAST(DATE_FORMAT(created_at, '%Y-%m-%d') AS CHAR) AS day
+             FROM orders WHERE ${where.join(' AND ')} ORDER BY created_at DESC`,
+            params
         );
-        const completed = rows.map(row => ({
-            id: row.id,
-            table_number: row.table_number,
-            source: row.order_type === 'waiter_assisted' ? 'Waiter' : 'QR menu',
-            payment_method: row.payment_method,
-            payment_status: row.payment_status,
-            total_amount: Number(row.total_amount),
-            created_at: row.created_at
-        }));
-        const paidOrders = completed.filter(row => ['paid', 'verified'].includes(row.payment_status));
-        const cents = paidOrders.reduce((sum, row) => sum + moneyInCents(row.total_amount), 0);
-        const byMethod = {};
-        for (const row of paidOrders) byMethod[row.payment_method] = (byMethod[row.payment_method] || 0) + moneyInCents(row.total_amount);
+
+        const orders = rows.map(completedOrderRow);
+        const days = [];
+        const byDay = new Map();
+        for (const row of rows) {
+            if (!byDay.has(row.day)) {
+                byDay.set(row.day, []);
+                days.push(row.day);
+            }
+            byDay.get(row.day).push(completedOrderRow(row));
+        }
+        const groups = days.map(day => ({ date: day, ...summariseCompleted(byDay.get(day)), orders: byDay.get(day) }));
+        const [availableDays] = await pool.query(
+            `SELECT CAST(DATE_FORMAT(DATE(created_at), '%Y-%m-%d') AS CHAR) AS day, COUNT(*) AS orders
+             FROM orders WHERE status = 'completed' GROUP BY DATE(created_at) ORDER BY day DESC LIMIT 90`
+        );
         res.json({
-            date,
+            mode,
+            range: mode === 'range' ? rangeRequested : null,
+            month: mode === 'month' ? (monthRequested || clock.this_month) : null,
+            date: null,
             today,
+            this_month: clock.this_month,
             latest_completed_date: latestCompleted || null,
-            completed_count: completed.length,
-            paid_count: paidOrders.length,
-            total_amount: Number((cents / 100).toFixed(2)),
-            average_amount: paidOrders.length ? Number((cents / 100 / paidOrders.length).toFixed(2)) : 0,
-            by_method: byMethod,
-            orders: completed
+            ...summariseCompleted(orders),
+            group_count: groups.length,
+            groups,
+            available_days: availableDays.map(row => ({ date: row.day, orders: Number(row.orders) }))
         });
     } catch (error) { next(error); }
 });

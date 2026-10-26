@@ -4067,8 +4067,8 @@ a.cashier-utility-link {
   display: flex;
   align-items: center;
   gap: 7px;
-  min-height: 29px;
-  padding: 0 9px;
+  min-height: 34px;
+  padding: 0 10px;
   border: 1px solid #e7e9ed;
   border-radius: 9px;
   background: white;
@@ -4081,9 +4081,104 @@ a.cashier-utility-link {
   background: transparent;
   color: #303a47;
   font-family: inherit;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 700;
   outline: none;
+  cursor: pointer;
+}
+.cashier-range-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.cashier-range-chip {
+  padding: 7px 12px;
+  border: 1px solid #e4e7eb;
+  border-radius: 99px;
+  background: white;
+  color: #56616f;
+  font-size: 12px;
+  font-weight: 700;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.cashier-range-chip:hover {
+  border-color: #ffc7a3;
+  color: #e8641c;
+}
+.cashier-range-chip.active {
+  border-color: #ffd0b0;
+  background: #fff1e7;
+  color: #e8641c;
+}
+.cashier-day-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-bottom: 14px;
+}
+.cashier-day-strip-label {
+  color: #8b95a3;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.cashier-day-chip {
+  display: grid;
+  gap: 2px;
+  min-width: 92px;
+  padding: 7px 10px;
+  border: 1px solid #e4e7eb;
+  border-radius: 10px;
+  background: white;
+}
+.cashier-day-chip strong {
+  color: #2b3542;
+  font-size: 12px;
+}
+.cashier-day-chip small {
+  color: #8b95a3;
+  font-size: 11px;
+}
+.cashier-day-chip:hover,
+.cashier-day-chip.active {
+  border-color: #ffd0b0;
+  background: #fff8f2;
+}
+.cashier-day-chip.active strong {
+  color: #e8641c;
+}
+.cashier-day-group + .cashier-day-group {
+  margin-top: 18px;
+}
+.cashier-day-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  border-left: 3px solid #f2683a;
+  border-radius: 0 9px 9px 0;
+  background: #f8f9fb;
+}
+.cashier-day-heading strong {
+  display: block;
+  color: #252e3b;
+  font-size: 13px;
+}
+.cashier-day-heading small {
+  color: #8b95a3;
+  font-size: 11px;
+}
+.cashier-day-heading > span {
+  color: #e8641c;
+  font-size: 14px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .cashier-report-totals {
   display: grid;
